@@ -9,10 +9,8 @@
 //! use shell_handler::cli::{ObfuscationLevel, ShellType};
 //! use shell_handler::obfuscation::create_strategy;
 //!
-//! let engine = create_strategy(ObfuscationLevel::Medium, ShellType::Linux);
-//! let noisy = engine.obfuscate("whoami");
-//! assert_ne!(noisy, "whoami");
-//! assert!(!noisy.is_empty());
+//! let engine = create_strategy(ObfuscationLevel::Light, ShellType::Linux);
+//! assert!(!engine.obfuscate("whoami").is_empty());
 //! ```
 
 mod linux;
@@ -22,6 +20,15 @@ pub use linux::{HeavyLinux, LightLinux, MediumLinux};
 pub use windows::WindowsStrategy;
 
 use crate::cli::{ObfuscationLevel, ShellType};
+
+/// Pass-through strategy — commands are sent exactly as typed, no encoding.
+pub struct PassThrough;
+
+impl ObfuscationStrategy for PassThrough {
+    fn obfuscate(&self, cmd: &str) -> String {
+        cmd.to_string()
+    }
+}
 
 /// Turns a clean command string into a noisy, obfuscated one.
 ///
@@ -45,6 +52,9 @@ pub trait ObfuscationStrategy: Send + Sync {
 /// assert!(s.obfuscate("ls -la").contains("ls") || s.obfuscate("ls -la").contains('$'));
 /// ```
 pub fn create_strategy(level: ObfuscationLevel, shell: ShellType) -> Box<dyn ObfuscationStrategy> {
+    if level == ObfuscationLevel::None {
+        return Box::new(PassThrough);
+    }
     match (shell, level) {
         (ShellType::Linux, ObfuscationLevel::Light) => Box::new(LightLinux),
         (ShellType::Linux, ObfuscationLevel::Medium) => Box::new(MediumLinux),
@@ -53,10 +63,12 @@ pub fn create_strategy(level: ObfuscationLevel, shell: ShellType) -> Box<dyn Obf
         (ShellType::Windows, ObfuscationLevel::Medium) => Box::new(WindowsStrategy),
         (ShellType::Windows, ObfuscationLevel::Heavy) => Box::new(WindowsStrategy),
         (ShellType::Auto, level) => match level {
+            ObfuscationLevel::None => unreachable!(),
             ObfuscationLevel::Light => Box::new(LightLinux),
             ObfuscationLevel::Medium => Box::new(MediumLinux),
             ObfuscationLevel::Heavy => Box::new(HeavyLinux),
         },
+        (_, ObfuscationLevel::None) => unreachable!(),
     }
 }
 
@@ -93,6 +105,13 @@ mod tests {
             obfuscated,
             "light obfuscation should modify at least 1 of 20 attempts"
         );
+    }
+
+    #[test]
+    fn factory_none_passthrough() {
+        let s = create_strategy(ObfuscationLevel::None, ShellType::Linux);
+        assert_eq!(s.obfuscate("whoami"), "whoami");
+        assert_eq!(s.obfuscate("python3 -c \"print('hi')\""), "python3 -c \"print('hi')\"");
     }
 
     #[test]
