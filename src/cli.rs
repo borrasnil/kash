@@ -151,6 +151,15 @@ pub enum Command {
 
     /// Terminate a running session gracefully.
     Kill(KillArgs),
+
+    /// Re-attach an interactive terminal to a detached session.
+    Attach(AttachArgs),
+
+    /// Upload a local file to a running session's remote system.
+    Upload(UploadArgs),
+
+    /// Download a file from a running session's remote system.
+    Download(DownloadArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +186,17 @@ pub struct ListenArgs {
     /// Override the random session ID with a custom value (useful for scripts).
     #[arg(long)]
     pub session: Option<String>,
+
+    /// Background the listener immediately — TCP connection still accepted in the
+    /// background process. Reconnect interactively with `attach <session-id>`.
+    /// Unix only.
+    #[arg(short = 'd', long)]
+    pub daemon: bool,
+
+    /// Internal flag: session is running headless (no local terminal).
+    /// Set automatically by --daemon; do not pass directly.
+    #[arg(long, hide = true)]
+    pub headless: bool,
 }
 
 impl ListenArgs {
@@ -254,6 +274,32 @@ pub struct KillArgs {
     pub session: String,
 }
 
+#[derive(ClapArgs, Debug)]
+pub struct AttachArgs {
+    /// Session ID to attach to.
+    pub session: String,
+}
+
+#[derive(ClapArgs, Debug)]
+pub struct UploadArgs {
+    /// Session ID.
+    pub session: String,
+    /// Local file path to upload.
+    pub local: String,
+    /// Remote destination path (defaults to the local filename).
+    pub remote: Option<String>,
+}
+
+#[derive(ClapArgs, Debug)]
+pub struct DownloadArgs {
+    /// Session ID.
+    pub session: String,
+    /// Remote file path to download.
+    pub remote: String,
+    /// Local destination path (defaults to the remote filename).
+    pub local: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -277,6 +323,23 @@ mod tests {
         assert_eq!(a.obfuscation_level(), ObfuscationLevel::None);
         assert_eq!(a.shell_type(), ShellType::Auto);
         assert!(a.session.is_none());
+        assert!(!a.daemon);
+        assert!(!a.headless);
+    }
+
+    #[test]
+    fn listen_daemon_flag() {
+        let cli = Cli::try_parse_from(["sh", "listen", "9001", "-d"]).unwrap();
+        let Command::Listen(a) = cli.command else { panic!() };
+        assert!(a.daemon);
+        assert!(!a.headless);
+    }
+
+    #[test]
+    fn listen_headless_hidden_flag() {
+        let cli = Cli::try_parse_from(["sh", "listen", "9001", "--headless"]).unwrap();
+        let Command::Listen(a) = cli.command else { panic!() };
+        assert!(a.headless);
     }
 
     #[test]
@@ -394,6 +457,13 @@ mod tests {
     fn kill_parses() {
         let cli = Cli::try_parse_from(["sh", "kill", "abc12345"]).unwrap();
         let Command::Kill(a) = cli.command else { panic!() };
+        assert_eq!(a.session, "abc12345");
+    }
+
+    #[test]
+    fn attach_parses() {
+        let cli = Cli::try_parse_from(["sh", "attach", "abc12345"]).unwrap();
+        let Command::Attach(a) = cli.command else { panic!() };
         assert_eq!(a.session, "abc12345");
     }
 

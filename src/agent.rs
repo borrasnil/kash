@@ -35,6 +35,17 @@ pub struct AgentResponse {
 /// Sent as the command string to signal the session to exit.
 pub const KILL_CMD: &str = "__SHHANDLER_KILL__";
 
+/// Sent as the command string to request an interactive attach.
+/// After sending this, the connection switches to bidirectional byte relay.
+pub const ATTACH_CMD: &str = "__SHHANDLER_ATTACH__";
+
+/// IPC prefix for upload-via-exec: `"__SHHANDLER_UPLOAD__\x00{local}\x00{remote}"`.
+/// Paths are separated by NUL bytes (valid in &str, not a line terminator).
+pub const UPLOAD_CMD_PREFIX: &str = "__SHHANDLER_UPLOAD__\x00";
+
+/// IPC prefix for download-via-exec: `"__SHHANDLER_DOWNLOAD__\x00{remote}\x00{local}"`.
+pub const DOWNLOAD_CMD_PREFIX: &str = "__SHHANDLER_DOWNLOAD__\x00";
+
 // ---------------------------------------------------------------------------
 // Session metadata (written to /tmp/.shh-<id>.info, read by `ps`/`inspect`)
 // ---------------------------------------------------------------------------
@@ -132,8 +143,15 @@ pub fn info_path(session_id: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Spawn a background Unix-socket listener for the given session.
-/// Incoming connections each deliver one `AgentCommand` to `cmd_tx`.
-pub fn serve(session_id: &str, cmd_tx: mpsc::Sender<AgentCommand>) -> std::io::Result<()> {
+///
+/// Incoming connections each deliver one `AgentCommand` to `cmd_tx`, except
+/// for `ATTACH_CMD` connections which are forwarded to `attach_tx` as a live
+/// `UnixStream` for bidirectional byte relay.
+pub fn serve(
+    session_id: &str,
+    cmd_tx: mpsc::Sender<AgentCommand>,
+    attach_tx: mpsc::Sender<UnixStream>,
+) -> std::io::Result<()> {
     let path = socket_path(session_id);
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
@@ -143,7 +161,8 @@ pub fn serve(session_id: &str, cmd_tx: mpsc::Sender<AgentCommand>) -> std::io::R
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let tx = cmd_tx.clone();
-                    tokio::spawn(handle_conn(stream, tx));
+                    let atx = attach_tx.clone();
+                    tokio::spawn(handle_conn(stream, tx, atx));
                 }
                 Err(_) => break,
             }
@@ -153,7 +172,11 @@ pub fn serve(session_id: &str, cmd_tx: mpsc::Sender<AgentCommand>) -> std::io::R
     Ok(())
 }
 
-async fn handle_conn(stream: UnixStream, cmd_tx: mpsc::Sender<AgentCommand>) {
+async fn handle_conn(
+    stream: UnixStream,
+    cmd_tx: mpsc::Sender<AgentCommand>,
+    attach_tx: mpsc::Sender<UnixStream>,
+) {
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
     let mut line = String::new();
@@ -163,6 +186,15 @@ async fn handle_conn(stream: UnixStream, cmd_tx: mpsc::Sender<AgentCommand>) {
     }
     let cmd = line.trim_end_matches(['\n', '\r']).to_string();
     if cmd.is_empty() {
+        return;
+    }
+
+    if cmd == ATTACH_CMD {
+        // Reunite the halves and hand the live stream to the session loop.
+        let r = reader.into_inner();
+        if let Ok(stream) = r.reunite(w) {
+            let _ = attach_tx.send(stream).await;
+        }
         return;
     }
 
