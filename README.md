@@ -18,9 +18,6 @@ cargo build --release
 
 # install it onto your PATH as `kash`
 cargo install --path .
-
-# or just use the built binary directly
-./target/release/kash --version
 ```
 
 ---
@@ -49,127 +46,6 @@ Options:
   -V, --version  Print version
 ```
 
-### `kash listen -h`
-
-```console
-$ kash listen -h
-Start a listener and wait for an incoming reverse shell
-
-Usage: kash listen [OPTIONS] <PORT>
-
-Arguments:
-  <PORT>  TCP port to listen on
-
-Options:
-  -l, --listen <LISTEN>            Bind address (default: all interfaces) [default: 0.0.0.0]
-  -o, --obfuscation <OBFUSCATION>  Obfuscation level applied to every sent command: none | light | medium | heavy [default: none]
-  -s, --shell <SHELL>              Target shell type: auto | linux | windows [default: auto]
-      --session <SESSION>          Override the random session ID with a custom value (useful for scripts)
-  -d, --daemon                     Background the listener immediately — TCP connection still accepted in the background process. Reconnect interactively with `attach <session-id>`. Unix only
-  -h, --help                       Print help
-```
-
-### `kash exec -h`
-
-```console
-$ kash exec -h
-Execute a command in a running session
-
-Usage: kash exec [OPTIONS] <SESSION> [COMMAND]...
-
-Arguments:
-  <SESSION>     Session ID to inject the command into
-  [COMMAND]...  Command tokens (joined with spaces). Use --cmd for complex commands
-
-Options:
-  -c, --cmd <CMD>        Exact command string sent to the remote shell — no token splitting. Use this for commands that contain quotes, pipes, or other shell syntax. When present, any trailing positional tokens are ignored
-      --format <FORMAT>  Output format: text (default) or json [default: text]
-  -h, --help             Print help (see more with '--help')
-```
-
-### Remaining subcommands
-
-```console
-$ kash ps -h
-List active shell sessions
-
-Usage: kash ps [OPTIONS]
-
-Options:
-  -q, --quiet  Print only session IDs, one per line (machine-readable)
-      --json   Output as JSON array
-  -h, --help   Print help
-```
-
-```console
-$ kash inspect -h
-Show detailed information about a session
-
-Usage: kash inspect <SESSION>
-
-Arguments:
-  <SESSION>  Session ID to inspect
-
-Options:
-  -h, --help  Print help
-```
-
-```console
-$ kash kill -h
-Terminate a running session gracefully
-
-Usage: kash kill <SESSION>
-
-Arguments:
-  <SESSION>  Session ID to terminate
-
-Options:
-  -h, --help  Print help
-```
-
-```console
-$ kash attach -h
-Re-attach an interactive terminal to a detached session
-
-Usage: kash attach <SESSION>
-
-Arguments:
-  <SESSION>  Session ID to attach to
-
-Options:
-  -h, --help  Print help
-```
-
-```console
-$ kash upload -h
-Upload a local file to a running session's remote system
-
-Usage: kash upload <SESSION> <LOCAL> [REMOTE]
-
-Arguments:
-  <SESSION>  Session ID
-  <LOCAL>    Local file path to upload
-  [REMOTE]   Remote destination path (defaults to the local filename)
-
-Options:
-  -h, --help  Print help
-```
-
-```console
-$ kash download -h
-Download a file from a running session's remote system
-
-Usage: kash download <SESSION> <REMOTE> [LOCAL]
-
-Arguments:
-  <SESSION>  Session ID
-  <REMOTE>   Remote file path to download
-  [LOCAL]    Local destination path (defaults to the remote filename)
-
-Options:
-  -h, --help  Print help
-```
-
 ---
 
 ## Basic usage
@@ -186,9 +62,9 @@ kash listen 4444 -d
   obfuscation  : none
   shell type   : auto
   listener     : 0.0.0.0:4444
-  session id   : monkey
+  session id   : <name>
 
-  [*] listening in background — attach with: kash attach monkey
+  [*] listening in background — attach with: kash attach <name>
 ```
 
 Without `-d` the terminal is dropped straight into the session when a shell connects. `-d` returns the terminal immediately (Unix only) and the session ID is an animal name that skips names already used by an active session.
