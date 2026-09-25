@@ -1,8 +1,8 @@
 # kash
 
 A reverse shell handler written in Rust, with Docker-style session management.
-Start a listener in the background, attach interactively from any terminal, and let an LLM or script run commands in the same live session via `kash exec`.
-Sessions are named after animals (`monkey`, `tiger`, `panda`, …) so they are easy to type.
+Start a listener in the background, attach interactively from any terminal. Kash comes with an interface for AI to interact with the same shell as the human.
+Sessions are named after animals (`monkey`, `tiger`, `panda`, …) instead of random blobs so they are easy to type.
 
 ---
 
