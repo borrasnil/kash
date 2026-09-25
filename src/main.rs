@@ -1,6 +1,6 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let result = shell_handler::run().await;
+    let result = kash::run().await;
 
     match &result {
         Ok(()) => {}
