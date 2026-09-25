@@ -160,3 +160,4 @@ The session exits gracefully and its `/tmp/.shh-monkey.{sock,info}` files are re
 | `heavy` | Random variant: double/triple base64, `/dev/shm` staging, printf octal |
 
 Windows targets always use pass-through. `light`/`medium`/`heavy` break multiline commands and can choke on single quotes — raise the level only when you need it.
+It uses [boo](https://github.com/borrasnil/boo) as the obfuscation library. **WIP**
