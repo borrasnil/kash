@@ -225,8 +225,8 @@ async fn cmd_exec(args: cli::ExecArgs) -> anyhow::Result<()> {
         anyhow::bail!(
             "exec requires a command\n\
              \n\
-             Simple:   shell-handler exec <session> whoami\n\
-             Complex:  shell-handler exec <session> --cmd \"python3 -c \\\"print('hello')\\\"\""
+             Simple:   kash exec <session> whoami\n\
+             Complex:  kash exec <session> --cmd \"python3 -c \\\"print('hello')\\\"\""
         );
     }
 
@@ -481,7 +481,7 @@ async fn cmd_attach(args: cli::AttachArgs) -> anyhow::Result<()> {
 
     let stream = tokio::net::UnixStream::connect(&sock).await.map_err(|_| {
         anyhow::anyhow!(
-            "session '{}' not found — is shell-handler running?",
+            "session '{}' not found — is kash running?",
             args.session
         )
     })?;

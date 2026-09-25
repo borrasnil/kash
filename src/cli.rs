@@ -113,18 +113,18 @@ impl std::fmt::Display for OutputFormatArg {
 /// # Examples
 ///
 /// ```text
-/// shell-handler listen 4444
-/// shell-handler listen 4444 -o heavy -s linux
-/// shell-handler ps
-/// shell-handler ps -q
-/// shell-handler exec <session-id> whoami
-/// shell-handler exec <session-id> --format json cat /etc/passwd
-/// shell-handler inspect <session-id>
-/// shell-handler kill <session-id>
+/// kash listen 4444
+/// kash listen 4444 -o heavy -s linux
+/// kash ps
+/// kash ps -q
+/// kash exec <session-id> whoami
+/// kash exec <session-id> --format json cat /etc/passwd
+/// kash inspect <session-id>
+/// kash kill <session-id>
 /// ```
 #[derive(Parser, Debug)]
 #[command(
-    name = "shell-handler",
+    name = "kash",
     about = "Reverse shell handler with obfuscation and session management",
     version,
     subcommand_required = true,
@@ -229,7 +229,7 @@ pub struct ExecArgs {
     /// When present, any trailing positional tokens are ignored.
     ///
     /// Example:
-    ///   shell-handler exec <id> --cmd "python3 -c \"print('hello')\""
+    ///   kash exec <id> --cmd "python3 -c \"print('hello')\""
     #[arg(long, short = 'c')]
     pub cmd: Option<String>,
 

@@ -219,7 +219,7 @@ async fn handle_conn(
 pub async fn send_command(session_id: &str, cmd: &str) -> anyhow::Result<(String, i32)> {
     let path = socket_path(session_id);
     let mut stream = UnixStream::connect(&path).await.map_err(|_| {
-        anyhow::anyhow!("session '{session_id}' not found — is shell-handler listening?")
+            anyhow::anyhow!("session '{session_id}' not found — is kash listening?")
     })?;
 
     stream.write_all(format!("{cmd}\n").as_bytes()).await?;

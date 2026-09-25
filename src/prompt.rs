@@ -54,7 +54,7 @@ pub fn startup_banner(
     let sl = shell_label(shell);
     let ver = env!("CARGO_PKG_VERSION");
     format!(
-        "\n  {WHITE}shell-handler{RST}  {DIM}─────────────────────────────{RST}  {DIM}v{ver}{RST}\n\
+        "\n  {WHITE}kash{RST}  {DIM}─────────────────────────────{RST}  {DIM}v{ver}{RST}\n\
          \n\
          {DIM}  obfuscation  :{RST}  {oc}{ol}{RST}\n\
          {DIM}  shell type   :{RST}  {CYAN}{sl}{RST}\n\
@@ -98,7 +98,7 @@ pub fn banner_session_detached(session_id: &str) -> String {
     format!(
         "{YELLOW}[*]{RST} session {CYAN}{session_id}{RST} detached\r\n\
          {DIM}    ├ type 'bg' in your shell to resume in background{RST}\r\n\
-         {DIM}    └ shell-handler attach {session_id}{RST} {DIM}to reconnect{RST}"
+         {DIM}    └ kash attach {session_id}{RST} {DIM}to reconnect{RST}"
     )
 }
 
@@ -115,14 +115,14 @@ pub fn startup_banner_daemon(
     let sl = shell_label(shell);
     let ver = env!("CARGO_PKG_VERSION");
     format!(
-        "\n  {WHITE}shell-handler{RST}  {DIM}────────────────────────────{RST}  {DIM}v{ver}  daemon{RST}\n\
+        "\n  {WHITE}kash{RST}  {DIM}────────────────────────────{RST}  {DIM}v{ver}  daemon{RST}\n\
          \n\
          {DIM}  obfuscation  :{RST}  {oc}{ol}{RST}\n\
          {DIM}  shell type   :{RST}  {CYAN}{sl}{RST}\n\
          {DIM}  listener     :{RST}  {BOLD}{listen}:{port}{RST}\n\
          {DIM}  session id   :{RST}  {CYAN}{session_id}{RST}\n\
          \n\
-         {DIM}  [*] listening in background — attach with:{RST}  shell-handler attach {session_id}\n"
+         {DIM}  [*] listening in background — attach with:{RST}  kash attach {session_id}\n"
     )
 }
 
@@ -148,14 +148,14 @@ pub fn banner_attach_session_closed() -> String {
 pub fn help_text() -> &'static str {
     "\
 \x1b[1;37mSession commands\x1b[0m \x1b[2m(from another terminal)\x1b[0m
-  \x1b[1;32mshell-handler ps\x1b[0m                               list active sessions
-  \x1b[1;32mshell-handler ps -q\x1b[0m                            list session IDs only
-  \x1b[1;32mshell-handler exec\x1b[0m \x1b[2m<id> <command>\x1b[0m            run command in session
-  \x1b[1;32mshell-handler exec --format json\x1b[0m \x1b[2m<id> <cmd>\x1b[0m  JSON output for LLMs
-  \x1b[1;32mshell-handler upload\x1b[0m \x1b[2m<id> <local> [remote]\x1b[0m   push file via session IPC
-  \x1b[1;32mshell-handler download\x1b[0m \x1b[2m<id> <remote> [local]\x1b[0m fetch file via session IPC
-  \x1b[1;32mshell-handler inspect\x1b[0m \x1b[2m<id>\x1b[0m                   show session details
-  \x1b[1;32mshell-handler kill\x1b[0m \x1b[2m<id>\x1b[0m                      terminate a session
+  \x1b[1;32mkash ps\x1b[0m                               list active sessions
+  \x1b[1;32mkash ps -q\x1b[0m                            list session IDs only
+  \x1b[1;32mkash exec\x1b[0m \x1b[2m<id> <command>\x1b[0m            run command in session
+  \x1b[1;32mkash exec --format json\x1b[0m \x1b[2m<id> <cmd>\x1b[0m  JSON output for LLMs
+  \x1b[1;32mkash upload\x1b[0m \x1b[2m<id> <local> [remote]\x1b[0m   push file via session IPC
+  \x1b[1;32mkash download\x1b[0m \x1b[2m<id> <remote> [local]\x1b[0m fetch file via session IPC
+  \x1b[1;32mkash inspect\x1b[0m \x1b[2m<id>\x1b[0m                   show session details
+  \x1b[1;32mkash kill\x1b[0m \x1b[2m<id>\x1b[0m                      terminate a session
 
 \x1b[1;37mInteractive commands\x1b[0m \x1b[2m(type directly in raw PTY mode or handler mode)\x1b[0m
   \x1b[1;32mhelp\x1b[0m                         show this help
@@ -163,7 +163,7 @@ pub fn help_text() -> &'static str {
   \x1b[1;32mdownload\x1b[0m \x1b[2m<remote> [local]\x1b[0m    fetch file from target
   \x1b[1;32mupload\x1b[0m \x1b[2m<local> <remote>\x1b[0m      push file to target
   \x1b[1;32mdetach\x1b[0m                       release the terminal; TCP connection stays alive
-                               type 'bg' to background, then shell-handler attach <id>
+                               type 'bg' to background, then kash attach <id>
   \x1b[1;32mpty\x1b[0m                          \x1b[2m(handler mode)\x1b[0m switch to raw PTY passthrough
   \x1b[1;32mupgrade\x1b[0m                      \x1b[2m(handler mode)\x1b[0m re-send pty.spawn + raw PTY mode
 
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn startup_banner_contains_session_id() {
         let s = startup_banner("0.0.0.0", 4444, ObfuscationLevel::Heavy, ShellType::Linux, "deadbeef");
-        assert!(s.contains("shell-handler"));
+        assert!(s.contains("kash"));
         assert!(s.contains("deadbeef"));
         assert!(s.contains("4444"));
         assert!(s.contains("heavy"));

@@ -1,4 +1,4 @@
-//! Typed errors for the shell-handler crate.
+//! Typed errors for the kash crate.
 //!
 //! Uses [`thiserror`] to define fallible operations as an enum.
 //! The three variants cover:
