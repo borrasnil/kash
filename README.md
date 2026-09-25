@@ -52,7 +52,7 @@ shell-handler listen <PORT> [OPTIONS]
 | `-l, --listen <ADDR>` | `0.0.0.0` | Bind address |
 | `-o, --obfuscation <LEVEL>` | `none` | Obfuscation level: `none` \| `light` \| `medium` \| `heavy` |
 | `-s, --shell <TYPE>` | `auto` | Shell type: `auto` \| `linux` \| `windows` |
-| `--session <ID>` | *(random 8-char)* | Pin a custom session ID instead of generating one |
+| `--session <ID>` | *(random animal name)* | Pin a custom session ID instead of generating one |
 | `-d, --daemon` | off | Background the listener immediately; reconnect with `attach` (Unix only) |
 
 Examples:
