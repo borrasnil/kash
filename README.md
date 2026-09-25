@@ -11,7 +11,7 @@ Sessions are named after animals (`monkey`, `tiger`, `panda`, …) so they are e
 Requires Rust 1.85+ (edition 2024). From source:
 
 ```bash
-git clone <repo-url> && cd kash
+git clone https://github.com/borrasnil/kash && cd kash
 
 # build a release binary
 cargo build --release
