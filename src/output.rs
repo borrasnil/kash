@@ -15,7 +15,7 @@
 /// # Examples
 ///
 /// ```
-/// use shell_handler::output::clean_output;
+/// use kash::output::clean_output;
 ///
 /// let clean = clean_output(b"\x1b[31mred\x1b[0m normal");
 /// assert_eq!(clean, "red normal");

@@ -6,8 +6,8 @@
 //! # Example
 //!
 //! ```rust
-//! use shell_handler::cli::{ObfuscationLevel, ShellType};
-//! use shell_handler::obfuscation::create_strategy;
+//! use kash::cli::{ObfuscationLevel, ShellType};
+//! use kash::obfuscation::create_strategy;
 //!
 //! let engine = create_strategy(ObfuscationLevel::Light, ShellType::Linux);
 //! assert!(!engine.obfuscate("whoami").is_empty());
@@ -45,8 +45,8 @@ pub trait ObfuscationStrategy: Send + Sync {
 /// # Example
 ///
 /// ```rust
-/// use shell_handler::cli::{ObfuscationLevel, ShellType};
-/// use shell_handler::obfuscation::create_strategy;
+/// use kash::cli::{ObfuscationLevel, ShellType};
+/// use kash::obfuscation::create_strategy;
 ///
 /// let s = create_strategy(ObfuscationLevel::Light, ShellType::Linux);
 /// assert!(s.obfuscate("ls -la").contains("ls") || s.obfuscate("ls -la").contains('$'));

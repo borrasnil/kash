@@ -1,9 +1,9 @@
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use shell_handler::cli::{ObfuscationLevel, ShellType};
-use shell_handler::obfuscation::create_strategy;
-use shell_handler::output::clean_output;
+use kash::cli::{ObfuscationLevel, ShellType};
+use kash::obfuscation::create_strategy;
+use kash::output::clean_output;
 
 #[tokio::test]
 async fn obfuscated_command_over_tcp() {

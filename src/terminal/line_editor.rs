@@ -1,3 +1,9 @@
+//! Line editor for handler-mode input.
+//!
+//! Provides readline-style line editing with history, cursor movement,
+//! and kill commands. Emits [`LineAction`] values that the session loop
+//! interprets.
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// What the session loop should do after a keypress.
@@ -216,7 +222,10 @@ impl LineEditor {
             Some(0) => return,
             Some(pos) => self.history_pos = Some(pos - 1),
         }
-        let entry = self.history[self.history_pos.unwrap()].clone();
+        let Some(pos) = self.history_pos else {
+            return;
+        };
+        let entry = self.history[pos].clone();
         self.buffer = entry.chars().collect();
         self.cursor = self.buffer.len();
     }

@@ -1,3 +1,10 @@
+//! CLI argument parsing using `clap`.
+//!
+//! Defines the top-level CLI structure, subcommand arguments, and shared
+//! enums. The actual command handlers live in [`commands`].
+
+pub mod commands;
+
 use clap::{Args as ClapArgs, Parser, Subcommand};
 
 // ---------------------------------------------------------------------------

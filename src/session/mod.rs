@@ -1,8 +1,18 @@
+//! Session management: the core event loop for an interactive shell session.
+//!
+//! Handles the bidirectional data flow between the local terminal and the
+//! remote shell, including:
+//! * Raw PTY passthrough and handler-mode line editing
+//! * Agent command injection via IPC
+//! * Interactive client attach/detach
+//! * File transfer coordination
+
+mod display;
+mod meta;
+mod state;
+
 use std::io::{self, Write};
 use std::time::Duration;
-
-#[cfg(unix)]
-extern crate libc;
 
 use crossterm::{
     cursor,
@@ -13,132 +23,22 @@ use crossterm::{
 use futures_util::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 use crate::agent::{AgentCommand, AgentResponse};
 use crate::cli::{ObfuscationLevel, ShellType};
-use crate::line_editor::{LineAction, LineEditor};
+use crate::terminal::line_editor::{LineAction, LineEditor};
 use crate::obfuscation::ObfuscationStrategy;
 use crate::output::{clean_output, display_output};
+use crate::prompt;
 use crate::terminal::RawModeGuard;
 use crate::util::{key_to_bytes, raw_normalize};
-use crate::{agent, prompt, transfer};
 
-// ---------------------------------------------------------------------------
-// RAII cleanup guard
-// ---------------------------------------------------------------------------
+use crate::{agent, transfer};
 
-struct CleanupGuard {
-    sock_path: String,
-    meta_path: String,
-}
-
-impl Drop for CleanupGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.sock_path);
-        let _ = std::fs::remove_file(&self.meta_path);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Live session metadata
-// ---------------------------------------------------------------------------
-
-struct LiveMeta {
-    session_id: String,
-    peer: String,
-    user: String,
-    host: String,
-    obfuscation: &'static str,
-    shell: &'static str,
-    started: u64,
-    last_cmd: String,
-    last_cmd_at: u64,
-    cmd_count: u32,
-}
-
-impl LiveMeta {
-    fn new(
-        session_id: &str,
-        peer: &std::net::SocketAddr,
-        user: &str,
-        host: &str,
-        obfuscation: ObfuscationLevel,
-        shell_type: ShellType,
-    ) -> Self {
-        let started = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        Self {
-            session_id: session_id.to_string(),
-            peer: peer.to_string(),
-            user: user.to_string(),
-            host: host.to_string(),
-            obfuscation: prompt::obf_label(obfuscation),
-            shell: prompt::shell_label(shell_type),
-            started,
-            last_cmd: String::new(),
-            last_cmd_at: 0,
-            cmd_count: 0,
-        }
-    }
-
-    fn record_cmd(&mut self, cmd: &str) {
-        self.last_cmd = cmd.trim().replace('\n', " ");
-        self.last_cmd_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        self.cmd_count += 1;
-        self.persist();
-    }
-
-    fn persist(&self) {
-        let content = format!(
-            "peer={}\nuser={}\nhost={}\nobfuscation={}\nshell={}\n\
-             started={}\nlast_cmd={}\nlast_cmd_at={}\ncmd_count={}\n",
-            self.peer,
-            self.user,
-            self.host,
-            self.obfuscation,
-            self.shell,
-            self.started,
-            self.last_cmd,
-            self.last_cmd_at,
-            self.cmd_count,
-        );
-        let _ = std::fs::write(agent::info_path(&self.session_id), content);
-    }
-}
-
-
-// ---------------------------------------------------------------------------
-// Display state — tracks multi-row input so it can be fully erased on redraw
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Default)]
-struct DisplayState {
-    /// Row the cursor is on within the prompt+buffer display (0 = top).
-    cursor_row: u16,
-}
-
-// ---------------------------------------------------------------------------
-// Session state machine
-// ---------------------------------------------------------------------------
-
-enum SessionState {
-    Interactive,
-    AgentCollecting {
-        nonce: String,
-        buffer: String,
-        response_tx: oneshot::Sender<AgentResponse>,
-        /// True when the session is in raw PTY mode at command injection time.
-        /// The PTY line-discipline echoes the injected command back as the first
-        /// line of output; this flag tells the extractor to skip that line.
-        pty_mode: bool,
-    },
-}
+use display::{clear_input, redraw_input};
+use meta::{execute_raw_meta, last_line, parse_meta, parse_meta_raw, strip_done_marker, strip_start_marker};
+use state::{CleanupGuard, DisplayState, LiveMeta, SessionState};
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -176,10 +76,7 @@ pub async fn run_session(
     let mut meta =
         LiveMeta::new(session_id, &peer_addr, &user, &host, obfuscation, shell_type);
     meta.persist();
-    let _cleanup = CleanupGuard {
-        sock_path: agent::socket_path(session_id),
-        meta_path: agent::info_path(session_id),
-    };
+    let _cleanup = CleanupGuard::new(session_id);
 
     let (agent_tx, mut agent_rx) = mpsc::channel::<AgentCommand>(16);
     let (attach_tx, mut attach_rx) = mpsc::channel::<tokio::net::UnixStream>(4);
@@ -197,12 +94,13 @@ pub async fn run_session(
     // Windows targets skip the upgrade and use line-editor mode instead.
     let auto_raw = shell_type != ShellType::Windows;
     if auto_raw {
-        let (tw, th) = terminal::size().unwrap_or((80, 24));
-        let upgrade = format!(
-            "stty cols {tw} rows {th}; \
-             python3 -c 'import pty; pty.spawn(\"/bin/bash\")' 2>/dev/null || \
-             python -c 'import pty; pty.spawn(\"/bin/bash\")' 2>/dev/null || \
-             script -qc /bin/bash /dev/null 2>/dev/null"
+        // Send PTY upgrade command. Do NOT include `stty` here — the PTY
+        // isn't ready yet and stty will fail with "Inappropriate ioctl for
+        // device". The delayed stty timer (1.5 s) handles sizing later.
+        let upgrade = concat!(
+            "python3 -c 'import pty; pty.spawn(\"/bin/bash\")' 2>/dev/null || ",
+            "python -c 'import pty; pty.spawn(\"/bin/bash\")' 2>/dev/null || ",
+            "script -qc /bin/bash /dev/null 2>/dev/null"
         );
         let _ = writer.write_all(upgrade.as_bytes()).await;
         let _ = writer.write_all(b"\n").await;
@@ -253,8 +151,10 @@ pub async fn run_session(
                 initial_stty_done = true;
                 if raw_mode {
                     if let Ok((w, h)) = terminal::size() {
+                        // Suppress stty errors — the remote may not have a
+                        // fully initialized PTY yet.
                         let _ = writer.write_all(
-                            format!("stty cols {w} rows {h}\r").as_bytes()
+                            format!("stty cols {w} rows {h} 2>/dev/null\r").as_bytes()
                         ).await;
                         let _ = writer.flush().await;
                     }
@@ -267,7 +167,7 @@ pub async fn run_session(
                     Some(Ok(Event::Resize(w, h))) => {
                         if raw_mode {
                             let _ = writer.write_all(
-                                format!("stty cols {w} rows {h}\r").as_bytes()
+                                format!("stty cols {w} rows {h} 2>/dev/null\r").as_bytes()
                             ).await;
                             let _ = writer.flush().await;
                         } else {
@@ -297,7 +197,7 @@ pub async fn run_session(
                                     raw_guard.take();
                                 } else if let Ok((w, h)) = terminal::size() {
                                     let _ = writer.write_all(
-                                        format!("stty cols {w} rows {h}\r").as_bytes(),
+                                        format!("stty cols {w} rows {h} 2>/dev/null\r").as_bytes(),
                                     ).await;
                                     let _ = writer.flush().await;
                                 }
@@ -536,7 +436,7 @@ pub async fn run_session(
                         if terminal_active {
                             if raw_mode {
                                 if let Ok((w, h)) = terminal::size() {
-                                    let _ = writer.write_all(format!("stty cols {w} rows {h}\r").as_bytes()).await;
+                                    let _ = writer.write_all(format!("stty cols {w} rows {h} 2>/dev/null\r").as_bytes()).await;
                                     let _ = writer.flush().await;
                                 }
                             } else {
@@ -574,7 +474,7 @@ pub async fn run_session(
                         if terminal_active {
                             if raw_mode {
                                 if let Ok((w, h)) = terminal::size() {
-                                    let _ = writer.write_all(format!("stty cols {w} rows {h}\r").as_bytes()).await;
+                                    let _ = writer.write_all(format!("stty cols {w} rows {h} 2>/dev/null\r").as_bytes()).await;
                                     let _ = writer.flush().await;
                                 }
                             } else {
@@ -603,7 +503,7 @@ pub async fn run_session(
                     }
                 }
 
-                let nonce = generate_nonce();
+                let nonce = crate::util::generate_nonce();
                 let obfuscated = engine.obfuscate(&cmd);
                 let full_cmd = if raw_mode {
                     format!(
@@ -689,7 +589,7 @@ async fn handle_raw_key(
     prompt_vis: &mut String,
     editor: &mut LineEditor,
     display_state: &mut DisplayState,
-) -> anyhow::Result<(bool, Option<MetaAction>)> {
+) -> anyhow::Result<(bool, Option<meta::MetaAction>)> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     // CTRL+] or CTRL+Q — exit raw mode, return to line-editor.
@@ -862,32 +762,32 @@ async fn handle_le_key(
             let trimmed = line.trim().to_string();
 
             match parse_meta(&line) {
-                Some(MetaAction::Help) => {
+                Some(meta::MetaAction::Help) => {
                     write!(stdout, "{}", prompt::help_text().replace('\n', "\r\n"))?;
                     stdout.flush()?;
                     *display_state =
                         redraw_input(stdout, prompt_display, prompt_vis, editor, None)?;
                 }
-                Some(MetaAction::Clear) => {
+                Some(meta::MetaAction::Clear) => {
                     queue!(stdout, Clear(ClearType::All), cursor::MoveTo(0, 0))?;
                     *display_state =
                         redraw_input(stdout, prompt_display, prompt_vis, editor, None)?;
                 }
-                Some(MetaAction::Download { remote, local }) => {
+                Some(meta::MetaAction::Download { remote, local }) => {
                     if let Err(e) = transfer::download(reader, writer, &remote, &local, stdout, shell_type).await {
                         write!(stdout, "{}\r\n", prompt::banner_error(&e.to_string()))?;
                     }
                     *display_state =
                         redraw_input(stdout, prompt_display, prompt_vis, editor, None)?;
                 }
-                Some(MetaAction::Upload { local, remote }) => {
+                Some(meta::MetaAction::Upload { local, remote }) => {
                     if let Err(e) = transfer::upload(reader, writer, &local, &remote, stdout, shell_type).await {
                         write!(stdout, "{}\r\n", prompt::banner_error(&e.to_string()))?;
                     }
                     *display_state =
                         redraw_input(stdout, prompt_display, prompt_vis, editor, None)?;
                 }
-                Some(MetaAction::Pty) => {
+                Some(meta::MetaAction::Pty) => {
                     // Switch to raw PTY passthrough — no upgrade sent.
                     write!(
                         stdout,
@@ -896,7 +796,7 @@ async fn handle_le_key(
                     stdout.flush()?;
                     if let Ok((w, h)) = terminal::size() {
                         let _ = writer
-                            .write_all(format!("stty cols {w} rows {h}\r").as_bytes())
+                            .write_all(format!("stty cols {w} rows {h} 2>/dev/null\r").as_bytes())
                             .await;
                         let _ = writer.flush().await;
                     }
@@ -905,7 +805,7 @@ async fn handle_le_key(
                     prompt_vis.clear();
                     *display_state = DisplayState::default();
                 }
-                Some(MetaAction::Upgrade) => {
+                Some(meta::MetaAction::Upgrade) => {
                     // Send PTY upgrade then switch to raw mode.
                     // Always sent raw (no obfuscation) — reliability over stealth for setup.
                     write!(stdout, "\x1b[2m  [sending PTY upgrade...]\x1b[0m\r\n")?;
@@ -927,7 +827,7 @@ async fn handle_le_key(
                     *display_state = DisplayState::default();
                     if let Ok((w, h)) = terminal::size() {
                         let _ = writer
-                            .write_all(format!("stty cols {w} rows {h}\r").as_bytes())
+                            .write_all(format!("stty cols {w} rows {h} 2>/dev/null\r").as_bytes())
                             .await;
                         let _ = writer.flush().await;
                     }
@@ -937,7 +837,7 @@ async fn handle_le_key(
                     )?;
                     stdout.flush()?;
                 }
-                Some(MetaAction::Detach) => {
+                Some(meta::MetaAction::Detach) => {
                     write!(
                         stdout,
                         "\r\n{}\r\n",
@@ -995,141 +895,6 @@ fn cancel_agent(state: &mut SessionState, exit_code: i32) {
 }
 
 // ---------------------------------------------------------------------------
-// Display helpers
-// ---------------------------------------------------------------------------
-
-/// Compute `(total_rows, cursor_row, cursor_col)` for the input display.
-///
-/// Uses the *visible* (ANSI-stripped) prompt for column maths.
-/// Handles terminal-width wrapping and explicit `\n` in the buffer.
-fn display_geometry(
-    prompt_vis: &str,
-    buf: &str,
-    cursor_pos: usize,
-    width: usize,
-) -> (usize, usize, usize) {
-    let width = width.max(1);
-    let mut col = 0usize;
-    let mut row = 0usize;
-    let mut cursor_row = 0usize;
-    let mut cursor_col = 0usize;
-
-    for _ in prompt_vis.chars() {
-        col += 1;
-        if col >= width {
-            col = 0;
-            row += 1;
-        }
-    }
-
-    for (i, ch) in buf.chars().enumerate() {
-        if i == cursor_pos {
-            cursor_row = row;
-            cursor_col = col;
-        }
-        if ch == '\n' {
-            col = 0;
-            row += 1;
-        } else {
-            col += 1;
-            if col >= width {
-                col = 0;
-                row += 1;
-            }
-        }
-    }
-    if cursor_pos == buf.chars().count() {
-        cursor_row = row;
-        cursor_col = col;
-    }
-
-    (row + 1, cursor_row, cursor_col)
-}
-
-/// Write `buf` character-by-character starting at column `start_col`, emitting
-/// explicit `\r\n` every time the column counter reaches `tw`.  This prevents
-/// the "pending-wrap" terminal state that occurs when text fills the last column
-/// exactly — without explicit wraps, `MoveToColumn(0)` would stay on the same
-/// row instead of advancing to the next.
-fn write_buf_with_explicit_wraps(
-    stdout: &mut io::Stdout,
-    start_col: usize,
-    buf: &str,
-    tw: usize,
-) -> io::Result<()> {
-    let mut col = start_col;
-    for ch in buf.chars() {
-        if ch == '\n' {
-            write!(stdout, "\r\n")?;
-            col = 0;
-        } else {
-            write!(stdout, "{}", ch)?;
-            col += 1;
-            if col >= tw {
-                write!(stdout, "\r\n")?;
-                col = 0;
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Erase the previous input display and redraw prompt + buffer.
-///
-/// `prev = Some(s)` — cursor is within the old display; go up `s.cursor_row`
-///                    rows to the top before clearing.
-/// `prev = None`   — cursor is already at column 0 of a fresh line.
-fn redraw_input(
-    stdout: &mut io::Stdout,
-    prompt_display: &str,
-    prompt_vis: &str,
-    editor: &LineEditor,
-    prev: Option<DisplayState>,
-) -> io::Result<DisplayState> {
-    let (tw, _) = terminal::size().unwrap_or((80, 24));
-    let tw = tw.max(1) as usize;
-
-    if let Some(p) = prev {
-        if p.cursor_row > 0 {
-            queue!(stdout, cursor::MoveUp(p.cursor_row))?;
-        }
-    }
-    queue!(stdout, cursor::MoveToColumn(0), Clear(ClearType::FromCursorDown))?;
-
-    let buf = editor.buffer_str();
-
-    // Write the prompt (contains ANSI colour codes) then the buffer with
-    // explicit wrap-boundary \r\n so the terminal never enters pending-wrap.
-    write!(stdout, "{}", prompt_display)?;
-    let start_col = prompt_vis.chars().count() % tw;
-    write_buf_with_explicit_wraps(stdout, start_col, &buf, tw)?;
-
-    let (total_rows, cursor_row, cursor_col) =
-        display_geometry(prompt_vis, &buf, editor.cursor_pos(), tw);
-
-    let rows_below = (total_rows as u16).saturating_sub(cursor_row as u16 + 1);
-    if rows_below > 0 {
-        queue!(stdout, cursor::MoveUp(rows_below))?;
-    }
-    queue!(stdout, cursor::MoveToColumn(cursor_col as u16))?;
-
-    stdout.flush()?;
-    Ok(DisplayState {
-        cursor_row: cursor_row as u16,
-    })
-}
-
-/// Erase the current input display — call before writing remote output.
-fn clear_input(stdout: &mut io::Stdout, state: DisplayState) -> io::Result<()> {
-    if state.cursor_row > 0 {
-        queue!(stdout, cursor::MoveUp(state.cursor_row))?;
-    }
-    queue!(stdout, cursor::MoveToColumn(0), Clear(ClearType::FromCursorDown))?;
-    stdout.flush()
-}
-
-
-// ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
 
@@ -1172,182 +937,6 @@ async fn probe_identity(
         .unwrap_or_else(|_| ("?".to_string(), "?".to_string()))
 }
 
-fn generate_nonce() -> String {
-    use rand::Rng;
-    format!("{:08x}", rand::thread_rng().r#gen::<u32>())
-}
-
-fn last_line(s: &str) -> String {
-    s.lines().last().unwrap_or("").to_string()
-}
-
-fn strip_done_marker(s: &str, nonce: Option<&str>) -> String {
-    let Some(nonce) = nonce else {
-        return s.to_string();
-    };
-    let marker = format!("SH_CMD_DONE_{}:", nonce);
-    if let Some(pos) = s.find(&marker) {
-        let after = s[pos..].find('\n').map_or(s.len(), |p| pos + p + 1);
-        format!("{}{}", &s[..pos], &s[after..])
-    } else {
-        s.to_string()
-    }
-}
-
-fn strip_start_marker(s: &str, nonce: Option<&str>) -> String {
-    let Some(nonce) = nonce else {
-        return s.to_string();
-    };
-    let marker = format!("SH_CMD_START_{nonce}");
-    if let Some(pos) = s.find(&marker) {
-        let after = s[pos..].find('\n').map_or(s.len(), |p| pos + p + 1);
-        format!("{}{}", &s[..pos], &s[after..])
-    } else {
-        s.to_string()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Meta-commands
-// ---------------------------------------------------------------------------
-
-enum MetaAction {
-    Help,
-    Clear,
-    Download { remote: String, local: String },
-    Upload { local: String, remote: String },
-    /// Switch to raw PTY passthrough (shell must already be PTY).
-    Pty,
-    /// Send PTY upgrade command then switch to raw passthrough.
-    Upgrade,
-    /// Release the local terminal; keep the TCP connection alive.
-    Detach,
-}
-
-fn parse_meta_raw(buf: &[u8]) -> Option<MetaAction> {
-    let s = std::str::from_utf8(buf).ok()?;
-    parse_meta(s)
-}
-
-/// Execute a meta-command intercepted while in raw PTY mode.
-/// Raw mode stays active before and after; caller handles stty resync.
-async fn execute_raw_meta(
-    action: MetaAction,
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
-    reader: &mut tokio::net::tcp::OwnedReadHalf,
-    stdout: &mut io::Stdout,
-    terminal_active: &mut bool,
-    session_id: &str,
-    shell_type: ShellType,
-) -> anyhow::Result<()> {
-    // Drain any pending remote bytes (CTRL+U echo, stale PTY feedback) so they
-    // don't corrupt the display after the meta-action completes.
-    {
-        let mut drain = vec![0u8; 4096];
-        loop {
-            match tokio::time::timeout(
-                Duration::from_millis(150),
-                reader.read(&mut drain),
-            ).await {
-                Ok(Ok(n)) if n > 0 => {}
-                _ => break,
-            }
-        }
-    }
-    write!(stdout, "\r\n")?;
-    stdout.flush()?;
-    match action {
-        MetaAction::Help => {
-            write!(stdout, "{}", prompt::help_text().replace('\n', "\r\n"))?;
-        }
-        MetaAction::Clear => {
-            queue!(stdout, Clear(ClearType::All), cursor::MoveTo(0, 0))?;
-        }
-        MetaAction::Download { remote, local } => {
-            match transfer::download(reader, writer, &remote, &local, stdout, shell_type).await {
-                Ok(()) => {}
-                Err(e) => write!(stdout, "{}\r\n", prompt::banner_error(&e.to_string()))?,
-            }
-        }
-        MetaAction::Upload { local, remote } => {
-            match transfer::upload(reader, writer, &local, &remote, stdout, shell_type).await {
-                Ok(()) => {}
-                Err(e) => write!(stdout, "{}\r\n", prompt::banner_error(&e.to_string()))?,
-            }
-        }
-        MetaAction::Pty => {
-            write!(stdout, "\x1b[2m  [already in raw PTY mode — CTRL+Q for handler mode]\x1b[0m\r\n")?;
-        }
-        MetaAction::Upgrade => {
-            write!(stdout, "\x1b[2m  [sending PTY upgrade...]\x1b[0m\r\n")?;
-            stdout.flush()?;
-            let upgrade = concat!(
-                "python3 -c 'import pty; pty.spawn(\"/bin/bash\")' 2>/dev/null || ",
-                "python -c 'import pty; pty.spawn(\"/bin/bash\")' 2>/dev/null || ",
-                "script -qc /bin/bash /dev/null 2>/dev/null"
-            );
-            writer.write_all(upgrade.as_bytes()).await?;
-            writer.write_all(b"\n").await?;
-            writer.flush().await?;
-            tokio::time::sleep(Duration::from_millis(1000)).await;
-            write!(stdout, "\x1b[2m  [PTY upgraded]\x1b[0m\r\n")?;
-        }
-        MetaAction::Detach => {
-            write!(stdout, "\r\n{}\r\n", prompt::banner_session_detached(session_id))?;
-            stdout.flush()?;
-            *terminal_active = false;
-            #[cfg(unix)]
-            unsafe {
-                libc::raise(libc::SIGTSTP);
-            }
-        }
-    }
-    stdout.flush()?;
-    Ok(())
-}
-
-fn parse_meta(cmd: &str) -> Option<MetaAction> {
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    match parts.first().copied() {
-        Some("help") => Some(MetaAction::Help),
-        Some("clear" | "cls") => Some(MetaAction::Clear),
-        Some("pty") => Some(MetaAction::Pty),
-        Some("upgrade") => Some(MetaAction::Upgrade),
-        Some("detach") => Some(MetaAction::Detach),
-        Some("download") => {
-            if parts.len() < 2 {
-                return Some(MetaAction::Help);
-            }
-            let remote = parts[1].to_string();
-            let local = parts
-                .get(2)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| remote.rsplit('/').next().unwrap_or(&remote).to_string());
-            Some(MetaAction::Download { remote, local })
-        }
-        Some("upload") => {
-            if parts.len() < 2 {
-                return Some(MetaAction::Help);
-            }
-            let local = parts[1].to_string();
-            let remote = parts.get(2).map(|s| s.to_string()).unwrap_or_else(|| {
-                // Default: upload to current directory keeping the local filename.
-                std::path::Path::new(&local)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(&local)
-                    .to_string()
-            });
-            Some(MetaAction::Upload { local, remote })
-        }
-        _ => None,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1373,194 +962,5 @@ mod tests {
         let e = create_strategy(ObfuscationLevel::Light, crate::cli::ShellType::Linux);
         assert_send(&e);
         assert_sync(&e);
-    }
-
-    #[test]
-    fn nonce_is_8_hex_chars() {
-        let n = generate_nonce();
-        assert_eq!(n.len(), 8);
-        assert!(n.chars().all(|c| c.is_ascii_hexdigit()));
-    }
-
-    #[test]
-    fn last_line_extracts_prompt() {
-        assert_eq!(last_line("out\nwww-data@box:~$ "), "www-data@box:~$ ");
-        assert_eq!(last_line("$ "), "$ ");
-        assert_eq!(last_line(""), "");
-    }
-
-    #[test]
-    fn last_line_multiline_no_trailing_nl() {
-        assert_eq!(last_line("a\nb\nroot@host:~# "), "root@host:~# ");
-    }
-
-    #[test]
-    fn live_meta_record_cmd_increments() {
-        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
-        let mut m = LiveMeta::new(
-            "__test_meta__",
-            &addr,
-            "root",
-            "box",
-            ObfuscationLevel::Heavy,
-            ShellType::Linux,
-        );
-        assert_eq!(m.cmd_count, 0);
-        m.record_cmd("ls");
-        assert_eq!(m.cmd_count, 1);
-        m.record_cmd("whoami");
-        assert_eq!(m.cmd_count, 2);
-        let _ = std::fs::remove_file(agent::info_path("__test_meta__"));
-    }
-
-    #[test]
-    fn live_meta_strips_newlines() {
-        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
-        let mut m = LiveMeta::new(
-            "__test_meta2__",
-            &addr,
-            "u",
-            "h",
-            ObfuscationLevel::Light,
-            ShellType::Auto,
-        );
-        m.record_cmd("echo\nhello");
-        assert!(!m.last_cmd.contains('\n'));
-        let _ = std::fs::remove_file(agent::info_path("__test_meta2__"));
-    }
-
-    #[test]
-    fn display_geometry_single_row() {
-        let (rows, crow, ccol) = display_geometry("$ ", "abc", 1, 80);
-        assert_eq!(rows, 1);
-        assert_eq!(crow, 0);
-        assert_eq!(ccol, 3); // 2 (prompt) + 1 (cursor after first char)
-    }
-
-    #[test]
-    fn display_geometry_wraps() {
-        // 5 chars in width-4: "hell" on row 0, "o" on row 1.
-        let (rows, crow, ccol) = display_geometry("", "hello", 5, 4);
-        assert_eq!(rows, 2);
-        assert_eq!(crow, 1);
-        assert_eq!(ccol, 1);
-    }
-
-    #[test]
-    fn display_geometry_newline_in_buf() {
-        let (rows, crow, ccol) = display_geometry("$ ", "a\nb", 3, 80);
-        assert_eq!(rows, 2);
-        assert_eq!(crow, 1);
-        assert_eq!(ccol, 1);
-    }
-
-    #[test]
-    fn display_geometry_cursor_at_start() {
-        let (rows, crow, ccol) = display_geometry("$ ", "abc", 0, 80);
-        assert_eq!(rows, 1);
-        assert_eq!(crow, 0);
-        assert_eq!(ccol, 2); // cursor right after prompt
-    }
-
-    #[test]
-    fn strip_done_marker_removes_line() {
-        let s = "output\nSH_CMD_DONE_abc:0\n";
-        assert_eq!(strip_done_marker(s, Some("abc")), "output\n");
-    }
-
-    #[test]
-    fn strip_done_marker_no_nonce_passthrough() {
-        assert_eq!(strip_done_marker("output\n", None), "output\n");
-    }
-
-    #[test]
-    fn strip_done_marker_no_match_passthrough() {
-        assert_eq!(
-            strip_done_marker("output\n", Some("xyz")),
-            "output\n"
-        );
-    }
-
-    #[test]
-    fn raw_normalize_adds_cr() {
-        assert_eq!(raw_normalize(b"a\nb"), b"a\r\nb");
-    }
-
-    #[test]
-    fn raw_normalize_no_double_cr() {
-        assert_eq!(raw_normalize(b"a\r\nb"), b"a\r\nb");
-    }
-
-    #[test]
-    fn raw_normalize_strips_null() {
-        assert_eq!(raw_normalize(b"a\x00b"), b"ab");
-    }
-
-    #[test]
-    fn key_to_bytes_ctrl_a() {
-        let key = KeyEvent {
-            code: KeyCode::Char('a'),
-            modifiers: KeyModifiers::CONTROL,
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
-        };
-        assert_eq!(key_to_bytes(key), vec![0x01]);
-    }
-
-    #[test]
-    fn key_to_bytes_arrow_up() {
-        let key = KeyEvent {
-            code: KeyCode::Up,
-            modifiers: KeyModifiers::NONE,
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
-        };
-        assert_eq!(key_to_bytes(key), vec![0x1b, b'[', b'A']);
-    }
-
-    #[test]
-    fn key_to_bytes_f1() {
-        let key = KeyEvent {
-            code: KeyCode::F(1),
-            modifiers: KeyModifiers::NONE,
-            kind: crossterm::event::KeyEventKind::Press,
-            state: crossterm::event::KeyEventState::NONE,
-        };
-        assert_eq!(key_to_bytes(key), vec![0x1b, b'O', b'P']);
-    }
-
-    #[test]
-    fn parse_meta_pty_and_upgrade() {
-        assert!(matches!(parse_meta("pty"), Some(MetaAction::Pty)));
-        assert!(matches!(parse_meta("upgrade"), Some(MetaAction::Upgrade)));
-        assert!(matches!(parse_meta("detach"), Some(MetaAction::Detach)));
-    }
-
-    #[test]
-    fn parse_meta_basic() {
-        assert!(matches!(parse_meta("help"), Some(MetaAction::Help)));
-        assert!(matches!(parse_meta("clear"), Some(MetaAction::Clear)));
-        assert!(matches!(parse_meta("cls"), Some(MetaAction::Clear)));
-        assert!(matches!(
-            parse_meta("download /etc/passwd"),
-            Some(MetaAction::Download { .. })
-        ));
-        assert!(matches!(
-            parse_meta("upload ./foo /tmp/bar"),
-            Some(MetaAction::Upload { .. })
-        ));
-        // Single-arg form: remote defaults to local filename.
-        assert!(matches!(
-            parse_meta("upload ./foo"),
-            Some(MetaAction::Upload { remote, .. }) if remote == "foo"
-        ));
-        assert!(parse_meta("upload").map_or(false, |a| matches!(a, MetaAction::Help)));
-    }
-
-    #[test]
-    fn parse_meta_regular_returns_none() {
-        assert!(parse_meta("ls -la").is_none());
-        assert!(parse_meta("exit").is_none());
-        assert!(parse_meta("whoami").is_none());
     }
 }

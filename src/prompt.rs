@@ -1,8 +1,14 @@
+//! Banners, labels, and help text for the kash interface.
+//!
+//! All functions return `String` (or `&'static str`) containing ANSI escape
+//! sequences for colour and styling. The caller is responsible for converting
+//! `\n` to `\r\n` when printing in raw mode.
+
 use std::net::SocketAddr;
 
 use crate::cli::{ObfuscationLevel, ShellType};
 
-// ── ANSI palette ──────────────────────────────────────────────────────────────
+// -- ANSI palette --------------------------------------------------------------
 
 const RST: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -39,7 +45,7 @@ pub fn shell_label(shell: ShellType) -> &'static str {
     }
 }
 
-// ── Public API ────────────────────────────────────────────────────────────────
+// -- Public API ----------------------------------------------------------------
 
 /// Startup banner printed once before the listener blocks (uses `\n`, pre-raw-mode).
 pub fn startup_banner(

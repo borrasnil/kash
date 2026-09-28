@@ -1,3 +1,9 @@
+//! Terminal handling: raw mode guard and line editor.
+
+pub(crate) mod line_editor;
+
+pub use line_editor::{LineAction, LineEditor};
+
 use std::io::{self, Write};
 
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
