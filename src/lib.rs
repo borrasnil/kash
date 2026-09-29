@@ -7,6 +7,7 @@
 //! * [`agent`] — Unix-socket IPC for external callers (agents, LLMs)
 //! * [`obfuscation`] — command obfuscation strategies
 //! * [`transfer`] — file upload/download via the remote shell
+//! * [`update`] — update notification (crates.io version check)
 //! * [`terminal`] — raw mode guard and line editor
 //! * [`output`] — ANSI/control-character cleaning
 //! * [`prompt`] — banners and help text
@@ -24,6 +25,7 @@ pub mod prompt;
 pub mod session;
 pub mod terminal;
 pub mod transfer;
+pub mod update;
 pub mod util;
 
 use clap::Parser;
@@ -34,6 +36,7 @@ use crate::cli::commands;
 /// Parse CLI arguments and dispatch to the appropriate command handler.
 pub async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    crate::update::maybe_warn(cli.no_update_check);
 
     match cli.command {
         Command::Listen(args) => commands::listen::cmd_listen(args).await,

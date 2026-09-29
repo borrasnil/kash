@@ -1,5 +1,9 @@
 # kash
 
+[![crates.io](https://img.shields.io/crates/v/kash.svg)](https://crates.io/crates/kash)
+![version](https://img.shields.io/badge/version-0.2.1-blue)
+![platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey)
+
 A reverse shell handler written in Rust, with Docker-style session management.
 Start a listener in the background, attach interactively from any terminal. Kash comes with an interface for AI to interact with the same shell as the human.
 Sessions are named after animals (`monkey`, `tiger`, `panda`, …) instead of random blobs so they are easy to type.

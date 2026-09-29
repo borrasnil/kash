@@ -138,6 +138,10 @@ impl std::fmt::Display for OutputFormatArg {
     arg_required_else_help = true,
 )]
 pub struct Cli {
+    /// Skip the background update check (also: KASH_NO_UPDATE_CHECK=1).
+    #[arg(long, global = true)]
+    pub no_update_check: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
