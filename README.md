@@ -1,7 +1,6 @@
 # kash
 
-[![crates.io](https://img.shields.io/crates/v/kash.svg)](https://crates.io/crates/kash)
-![version](https://img.shields.io/badge/version-0.2.1-blue)
+![version](https://img.shields.io/badge/version-0.2.2-blue)
 ![platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey)
 
 A reverse shell handler written in Rust, with Docker-style session management.
