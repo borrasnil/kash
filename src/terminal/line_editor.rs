@@ -12,8 +12,10 @@ pub enum LineAction {
     Continue,
     /// User pressed Enter. The owned string is the complete input line.
     Submit(String),
-    /// Send raw bytes to the remote shell (CTRL+C → 0x03, CTRL+Z → 0x1a).
+    /// Send raw bytes to the remote shell (CTRL+C → 0x03).
     SendRaw(Vec<u8>),
+    /// CTRL+Z — detach locally, keep TCP alive (does not touch remote).
+    Detach,
     /// CTRL+L — caller should clear the screen and redraw.
     ClearScreen,
     /// CTRL+D on an empty buffer — caller should disconnect.
@@ -82,7 +84,7 @@ impl LineEditor {
                 }
             }
             KeyCode::Char('l') if ctrl => LineAction::ClearScreen,
-            KeyCode::Char('z') if ctrl => LineAction::SendRaw(vec![0x1a]),
+            KeyCode::Char('z') if ctrl => LineAction::Detach,
 
             // Cursor to start: CTRL+A or Home
             KeyCode::Char('a') if ctrl => {
@@ -334,12 +336,9 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_z_sends_sub() {
+    fn ctrl_z_detaches() {
         let mut ed = LineEditor::new();
-        match ed.handle_key(ctrl('z')) {
-            LineAction::SendRaw(b) => assert_eq!(b, vec![0x1a]),
-            _ => panic!("expected SendRaw"),
-        }
+        assert!(matches!(ed.handle_key(ctrl('z')), LineAction::Detach));
     }
 
     #[test]

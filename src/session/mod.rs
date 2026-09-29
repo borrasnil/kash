@@ -120,7 +120,10 @@ pub async fn run_session(
     let mut raw_line_buf: Vec<u8> = Vec::new();
     let mut ctrl_c_exit_armed = false; // true after first CTRL+C; second CTRL+C exits
     let mut display_state = DisplayState::default();
-    let mut events = EventStream::new();
+    // EventStream panics without a TTY ("reader source not set"), so only
+    // create it when we have a local terminal (non-headless). Headless
+    // daemons never poll keyboard input.
+    let mut events: Option<EventStream> = if headless { None } else { Some(EventStream::new()) };
     let mut editor = LineEditor::new();
     let mut net_buf = vec![0u8; 8192];
     let mut state = SessionState::Interactive;
@@ -162,7 +165,12 @@ pub async fn run_session(
             }
 
             // ── Keyboard (only when the local terminal is active) ─────────────
-            event_result = events.next(), if terminal_active => {
+            event_result = async {
+                match events.as_mut() {
+                    Some(ev) => ev.next().await,
+                    None => std::future::pending().await,
+                }
+            }, if terminal_active => {
                 match event_result {
                     Some(Ok(Event::Resize(w, h))) => {
                         if raw_mode {
@@ -729,6 +737,27 @@ async fn handle_le_key(
             writer.flush().await?;
             return Ok(false);
         }
+        LineAction::Detach => {
+            // CTRL+Z — detach locally, keep TCP alive. Same as the `detach`
+            // meta-command: release the terminal and suspend so the shell
+            // prompt returns immediately. User types 'bg' once, then
+            // `kash attach <id>` from any terminal to reconnect.
+            // Nothing is sent to the remote shell.
+            *ctrl_c_exit_armed = false;
+            cancel_agent(state, 130);
+            write!(
+                stdout,
+                "\r\n{}\r\n",
+                prompt::banner_session_detached(session_id)
+            )?;
+            stdout.flush()?;
+            *terminal_active = false;
+            #[cfg(unix)]
+            unsafe {
+                libc::raise(libc::SIGTSTP);
+            }
+            return Ok(false);
+        }
         _ => {
             // Any other key disarms the CTRL+C exit trigger.
             *ctrl_c_exit_armed = false;
@@ -867,7 +896,6 @@ async fn handle_le_key(
         }
 
         LineAction::SendRaw(bytes) => {
-            // CTRL+Z
             queue!(stdout, cursor::MoveToColumn(0), Clear(ClearType::CurrentLine))?;
             write!(stdout, "\x1b[2m^Z\x1b[0m\r\n")?;
             stdout.flush()?;
@@ -876,8 +904,8 @@ async fn handle_le_key(
             writer.flush().await?;
         }
 
-        // ClearScreen and Disconnect are handled before this match block.
-        LineAction::ClearScreen | LineAction::Disconnect => unreachable!(),
+        // ClearScreen, Disconnect and Detach are handled before this match block.
+        LineAction::ClearScreen | LineAction::Disconnect | LineAction::Detach => unreachable!(),
     }
 
     Ok(false)

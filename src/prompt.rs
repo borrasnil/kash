@@ -181,7 +181,7 @@ pub fn help_text() -> &'static str {
 
 \x1b[1;37mHandler mode — signals\x1b[0m
   \x1b[1;33mCTRL+C\x1b[0m        send interrupt \x1b[2m(\\x03)\x1b[0m  — press twice to disconnect session
-  \x1b[1;33mCTRL+Z\x1b[0m        send suspend  \x1b[2m(\\x1a)\x1b[0m to remote shell
+  \x1b[1;33mCTRL+Z\x1b[0m        detach session — TCP stays alive, type 'bg' then kash attach <id>
   \x1b[1;33mCTRL+L\x1b[0m        clear screen
   \x1b[1;33mCTRL+D\x1b[0m        send EOF \x1b[2m(\\x04)\x1b[0m — exits python3 REPL, exits bash gracefully
 
