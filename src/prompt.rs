@@ -157,7 +157,8 @@ pub fn help_text() -> &'static str {
   \x1b[1;32mkash ps\x1b[0m                               list active sessions
   \x1b[1;32mkash ps -q\x1b[0m                            list session IDs only
   \x1b[1;32mkash exec\x1b[0m \x1b[2m<id> <command>\x1b[0m            run command in session
-  \x1b[1;32mkash exec --format json\x1b[0m \x1b[2m<id> <cmd>\x1b[0m  JSON output for LLMs
+   \x1b[1;32mkash exec --format json\x1b[0m \x1b[2m<id> <cmd>\x1b[0m  JSON output for LLMs
+   \x1b[1;32mkash run\x1b[0m \x1b[2m<module> <id> [--set K=V]\x1b[0m  run a script module in session
   \x1b[1;32mkash upload\x1b[0m \x1b[2m<id> <local> [remote]\x1b[0m   push file via session IPC
   \x1b[1;32mkash download\x1b[0m \x1b[2m<id> <remote> [local]\x1b[0m fetch file via session IPC
   \x1b[1;32mkash inspect\x1b[0m \x1b[2m<id>\x1b[0m                   show session details

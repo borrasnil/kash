@@ -171,6 +171,12 @@ pub enum Command {
 
     /// Download a file from a running session's remote system.
     Download(DownloadArgs),
+
+    /// Run a script module in a running session.
+    Run(RunArgs),
+
+    /// List available script modules.
+    Modules(ModulesArgs),
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +315,36 @@ pub struct DownloadArgs {
     pub remote: String,
     /// Local destination path (defaults to the remote filename).
     pub local: Option<String>,
+}
+
+#[derive(ClapArgs, Debug)]
+pub struct RunArgs {
+    /// Module name (see `kash modules`).
+    pub module: String,
+    /// Session ID to run it in.
+    pub session: String,
+    /// Template values (`--set KEY=VAL`, repeatable) for `{{VAR}}` placeholders.
+    #[arg(long = "set", value_name = "KEY=VAL")]
+    pub set: Vec<String>,
+    /// Skip the confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+    /// Output format: text (default) or json.
+    #[arg(long, default_value = "text")]
+    pub format: OutputFormatArg,
+}
+
+impl RunArgs {
+    pub fn output_format(&self) -> OutputFormat {
+        self.format.0
+    }
+}
+
+#[derive(ClapArgs, Debug)]
+pub struct ModulesArgs {
+    /// Output as JSON array.
+    #[arg(long)]
+    pub json: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -476,6 +512,41 @@ mod tests {
         let cli = Cli::try_parse_from(["sh", "attach", "abc12345"]).unwrap();
         let Command::Attach(a) = cli.command else { panic!() };
         assert_eq!(a.session, "abc12345");
+    }
+
+    #[test]
+    fn run_minimal() {
+        let cli = Cli::try_parse_from(["sh", "run", "enum-users", "abc12345"]).unwrap();
+        let Command::Run(a) = cli.command else { panic!() };
+        assert_eq!(a.module, "enum-users");
+        assert_eq!(a.session, "abc12345");
+        assert!(a.set.is_empty());
+        assert!(!a.yes);
+        assert_eq!(a.output_format(), OutputFormat::Text);
+    }
+
+    #[test]
+    fn run_all_options() {
+        let cli = Cli::try_parse_from([
+            "sh", "run", "s3-enum", "abc12345",
+            "--set", "BUCKET=foo", "--set", "REGION=us-east-1",
+            "--yes", "--format", "json",
+        ])
+        .unwrap();
+        let Command::Run(a) = cli.command else { panic!() };
+        assert_eq!(a.set, vec!["BUCKET=foo", "REGION=us-east-1"]);
+        assert!(a.yes);
+        assert_eq!(a.output_format(), OutputFormat::Json);
+    }
+
+    #[test]
+    fn modules_parses() {
+        let cli = Cli::try_parse_from(["sh", "modules"]).unwrap();
+        let Command::Modules(a) = cli.command else { panic!() };
+        assert!(!a.json);
+        let cli = Cli::try_parse_from(["sh", "modules", "--json"]).unwrap();
+        let Command::Modules(a) = cli.command else { panic!() };
+        assert!(a.json);
     }
 
     #[test]

@@ -184,7 +184,7 @@ where
 mod tests {
     use super::*;
     use crate::util::base64_encode;
-    use tokio::io::duplex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
     fn make_stdout() -> io::Stdout {
         io::stdout()

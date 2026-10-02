@@ -9,5 +9,7 @@ pub mod exec;
 pub mod inspect;
 pub mod kill;
 pub mod listen;
+pub mod modules;
 pub mod ps;
+pub mod run;
 pub mod upload;

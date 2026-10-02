@@ -54,6 +54,14 @@ pub const UPLOAD_CMD_PREFIX: &str = "__SHHANDLER_UPLOAD__\x00";
 /// IPC prefix for download-via-exec: `"__SHHANDLER_DOWNLOAD__\x00{remote}\x00{local}"`.
 pub const DOWNLOAD_CMD_PREFIX: &str = "__SHHANDLER_DOWNLOAD__\x00";
 
+/// IPC prefix for module scripts: `"__SHHANDLER_RUN__\x00{display}\x00{cmd}"`.
+///
+/// `{cmd}` is a single line run **verbatim** (never obfuscated —
+/// multiline and quoting break under light/medium/heavy levels).
+/// `{display}` (e.g. `run enum-users`) is shown in the terminal banner and
+/// recorded in session history instead of the raw payload.
+pub const RUN_CMD_PREFIX: &str = "__SHHANDLER_RUN__\x00";
+
 // ---------------------------------------------------------------------------
 // Session metadata (written to /tmp/.shh-<id>.info, read by `ps`/`inspect`)
 // ---------------------------------------------------------------------------

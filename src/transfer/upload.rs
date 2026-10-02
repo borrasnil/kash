@@ -85,9 +85,15 @@ where
                 writer.write_all(b"\n").await?;
                 bytes_sent += n as u64;
 
+                // Pace the stream: an unthrottled multi-KB burst overruns
+                // the remote PTY input queue (canonical mode), merging and
+                // duplicating lines — seen live as corrupt heredocs past
+                // ~4 KB. 2 ms per 8 lines (~300 KB/s ceiling) is invisible
+                // on small files and keeps large ones intact.
                 flush_counter += 1;
-                if flush_counter >= 64 {
+                if flush_counter >= 8 {
                     writer.flush().await?;
+                    tokio::time::sleep(Duration::from_millis(2)).await;
                     flush_counter = 0;
                 }
 
@@ -130,16 +136,19 @@ where
 
     // Close the heredoc and trigger decode. Decoder chain (most to least portable):
     //   1. python3 — always available on macOS; handles wrapped base64 natively
-    //   2. base64 -d — GNU coreutils (Linux)
-    //   3. base64 -D — BSD base64 flag (older macOS)
+    //   2. base64 -d — GNU coreutils (Linux), BSD via stdin redirect
+    //   3. base64 -D — older BSD flag, also via stdin redirect
+    // Stdin redirect (`<`) rather than a file argument: BSD base64 rejects
+    // bare file operands (`base64 -d file` → exit 64) while GNU accepts
+    // both — redirect works everywhere.
     // History and echo are restored at the end so they are always repaired even
     // if the decode fails and our Rust code bails after reading the exit marker.
     let up_marker = format!("SHUP_{nonce}:");
     let close_cmd = format!(
         "__SHUPEOF__\n \
          python3 -c \"import base64,sys;sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))\" < '{tmp}' > {qpath} 2>/dev/null \
-         || base64 -d '{tmp}' > {qpath} 2>/dev/null \
-         || base64 -D '{tmp}' > {qpath} 2>/dev/null; \
+         || base64 -d < '{tmp}' > {qpath} 2>/dev/null \
+         || base64 -D < '{tmp}' > {qpath} 2>/dev/null; \
          echo 'SHUP_{nonce}:'$?; rm -f '{tmp}'; \
          set -o history; HISTFILE=\"$_OHFP\"; unset _OHFP; stty echo 2>/dev/null\n"
     );

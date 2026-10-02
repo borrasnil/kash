@@ -22,6 +22,7 @@ pub mod listen;
 pub mod obfuscation;
 pub mod output;
 pub mod prompt;
+pub mod script;
 pub mod session;
 pub mod terminal;
 pub mod transfer;
@@ -47,5 +48,7 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Attach(args) => commands::attach::cmd_attach(args).await,
         Command::Upload(args) => commands::upload::cmd_upload(args).await,
         Command::Download(args) => commands::download::cmd_download(args).await,
+        Command::Run(args) => commands::run::cmd_run(args).await,
+        Command::Modules(args) => commands::modules::cmd_modules(args),
     }
 }

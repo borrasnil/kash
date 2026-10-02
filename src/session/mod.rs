@@ -499,33 +499,49 @@ pub async fn run_session(
                 }
 
                 // Show the agent-command banner when the local terminal is active.
+                // Module scripts (`RUN_CMD_PREFIX`) run verbatim — never
+                // obfuscated — and show their display name instead of the
+                // raw payload.
+                let (payload, banner_cmd) = match cmd.strip_prefix(agent::RUN_CMD_PREFIX) {
+                    Some(rest) => match rest.split_once('\x00') {
+                        Some((display, raw)) => (raw.to_string(), display.to_string()),
+                        None => {
+                            let _ = response_tx.send(AgentResponse {
+                                output: "run: malformed IPC command\n".to_string(),
+                                exit_code: 1,
+                            });
+                            continue;
+                        }
+                    },
+                    None => (engine.obfuscate(&cmd), cmd.clone()),
+                };
                 if terminal_active {
                     if raw_mode {
-                        write!(stdout, "\r\n{}\r\n", prompt::banner_agent_cmd(&cmd))?;
+                        write!(stdout, "\r\n{}\r\n", prompt::banner_agent_cmd(&banner_cmd))?;
                         stdout.flush()?;
                     } else {
                         clear_input(&mut stdout, display_state)?;
                         display_state = DisplayState::default();
-                        write!(stdout, "{}\r\n", prompt::banner_agent_cmd(&cmd))?;
+                        write!(stdout, "{}\r\n", prompt::banner_agent_cmd(&banner_cmd))?;
                         stdout.flush()?;
                     }
                 }
 
                 let nonce = crate::util::generate_nonce();
-                let obfuscated = engine.obfuscate(&cmd);
+                let payload_cmd = payload;
                 let full_cmd = if raw_mode {
                     format!(
                         "stty -echo 2>/dev/null; echo 'SH_CMD_START_{nonce}'; \
-                         {obfuscated}; _shec=$?; \
+                         {payload_cmd}; _shec=$?; \
                          stty echo 2>/dev/null; echo 'SH_CMD_DONE_{nonce}:'$_shec"
                     )
                 } else {
-                    format!("{obfuscated}; echo 'SH_CMD_DONE_{nonce}:'$?")
+                    format!("{payload_cmd}; echo 'SH_CMD_DONE_{nonce}:'$?")
                 };
                 writer.write_all(full_cmd.as_bytes()).await?;
                 writer.write_all(b"\n").await?;
                 writer.flush().await?;
-                meta.record_cmd(&cmd);
+                meta.record_cmd(&banner_cmd);
 
                 state = SessionState::AgentCollecting {
                     nonce,
