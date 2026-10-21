@@ -14,6 +14,9 @@ sha2 = "0.10"
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures-util = "0.3"
 ureq = "2"
+russh = "0.64"
+rpassword = "7"
+winrm-rs = "1.2.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

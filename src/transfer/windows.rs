@@ -13,17 +13,13 @@ use super::protocol::*;
 use crate::util::gen_temp_nonce;
 
 /// Download a remote file from a Windows/PowerShell target.
-pub(super) async fn download_windows<R, W>(
-    reader: &mut R,
-    writer: &mut W,
+pub(super) async fn download_windows(
+    reader: &mut (dyn AsyncRead + Unpin),
+    writer: &mut (dyn AsyncWrite + Unpin),
     remote_path: &str,
     local_path: &str,
     stdout: &mut io::Stdout,
-) -> anyhow::Result<()>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
+) -> anyhow::Result<()> {
     let nonce = gen_nonce();
     let ds: Vec<u8> = format!("SHSTRT{nonce}").into_bytes();
     let de: Vec<u8> = format!("SHEEND{nonce}").into_bytes();
@@ -118,17 +114,13 @@ where
 /// on Windows).  Chunk size is larger than Linux to reduce round-trips.
 /// Works whether the current shell is cmd.exe or PowerShell; the commands
 /// use only .NET APIs available on all PowerShell versions.
-pub(super) async fn upload_windows<R, W>(
-    reader: &mut R,
-    writer: &mut W,
+pub(super) async fn upload_windows(
+    reader: &mut (dyn AsyncRead + Unpin),
+    writer: &mut (dyn AsyncWrite + Unpin),
     local_path: &str,
     remote_path: &str,
     stdout: &mut io::Stdout,
-) -> anyhow::Result<()>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
+) -> anyhow::Result<()> {
     let metadata = tokio::fs::metadata(local_path).await
         .map_err(|_| anyhow::anyhow!("local file not found: {local_path}"))?;
     let file_size = metadata.len();

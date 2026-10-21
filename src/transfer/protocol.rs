@@ -20,7 +20,7 @@ pub(super) const PROGRESS_EVERY: u64 = 512 * 1024;
 ///
 /// Uses a single deadline so a chatty remote (PS1 prompts, banners) cannot
 /// extend the drain indefinitely by continuously sending data within the window.
-pub(super) async fn drain_reader<R: AsyncRead + Unpin>(reader: &mut R, for_duration: Duration) {
+pub(super) async fn drain_reader<R: AsyncRead + Unpin + ?Sized>(reader: &mut R, for_duration: Duration) {
     let deadline = tokio::time::Instant::now() + for_duration;
     let mut buf = vec![0u8; 4096];
     loop {
@@ -145,7 +145,7 @@ pub(super) async fn flush_b64(
 }
 
 /// Read from `reader` until `marker` appears in the accumulated text.
-pub(super) async fn read_until_marker<R: AsyncRead + Unpin>(
+pub(super) async fn read_until_marker<R: AsyncRead + Unpin + ?Sized>(
     reader: &mut R,
     marker: &str,
 ) -> anyhow::Result<String> {
@@ -157,7 +157,7 @@ pub(super) async fn read_until_marker<R: AsyncRead + Unpin>(
 /// Searches for `marker` in the raw byte buffer before converting to UTF-8,
 /// so non-UTF-8 bytes from the remote (binary filenames, etc.) cannot corrupt
 /// the ASCII-only marker via `from_utf8_lossy` replacement characters.
-pub(super) async fn read_until_marker_with_prefix<R: AsyncRead + Unpin>(
+pub(super) async fn read_until_marker_with_prefix<R: AsyncRead + Unpin + ?Sized>(
     reader: &mut R,
     marker: &str,
     prefix: String,
@@ -199,7 +199,7 @@ pub(super) async fn read_until_marker_with_prefix<R: AsyncRead + Unpin>(
 /// `local_file`.  Shared by both the Linux and Windows download paths.
 ///
 /// Returns the number of decoded bytes written.
-pub(super) async fn recv_b64_to_file<R: AsyncRead + Unpin>(
+pub(super) async fn recv_b64_to_file<R: AsyncRead + Unpin + ?Sized>(
     reader: &mut R,
     local_file: &mut tokio::fs::File,
     ds: &[u8],

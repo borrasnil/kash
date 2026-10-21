@@ -234,7 +234,7 @@ impl LineEditor {
 
     fn history_next(&mut self) {
         match self.history_pos {
-            None => return,
+            None => (),
             Some(pos) if pos + 1 >= self.history.len() => {
                 self.history_pos = None;
                 let saved = std::mem::take(&mut self.saved_buffer);
@@ -248,6 +248,12 @@ impl LineEditor {
                 self.cursor = self.buffer.len();
             }
         }
+    }
+}
+
+impl Default for LineEditor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

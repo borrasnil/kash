@@ -1,7 +1,7 @@
 //! Typed errors for the kash crate.
 //!
 //! Uses [`thiserror`] to define fallible operations as an enum.
-//! The three variants cover:
+//! The variants cover:
 //!
 //! * [`BindFailed`](ShellHandlerError::BindFailed) — binding to the
 //!   listen address/port failed.

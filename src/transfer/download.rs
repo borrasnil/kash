@@ -19,18 +19,18 @@ use super::protocol::*;
 use crate::cli::ShellType;
 
 /// Download a remote file to the local filesystem.
-pub async fn download<R, W>(
-    reader: &mut R,
-    writer: &mut W,
+///
+/// Takes trait-object references rather than generic stream types so the
+/// ~12 KiB function body compiles once per shell dialect instead of once per
+/// transport × dialect. See [`crate::transport::BoxReader`] / [`crate::transport::BoxWriter`].
+pub async fn download(
+    reader: &mut (dyn AsyncRead + Unpin),
+    writer: &mut (dyn AsyncWrite + Unpin),
     remote_path: &str,
     local_path: &str,
     stdout: &mut io::Stdout,
     shell_type: ShellType,
-) -> anyhow::Result<()>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
+) -> anyhow::Result<()> {
     if shell_type == ShellType::Windows {
         return super::windows::download_windows(reader, writer, remote_path, local_path, stdout).await;
     }

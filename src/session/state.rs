@@ -2,8 +2,9 @@
 //! and the session state machine enum.
 
 use crate::agent;
-use crate::cli::{ObfuscationLevel, ShellType};
+use crate::cli::ShellType;
 use crate::prompt;
+use crate::transport::TransportInfo;
 
 // ---------------------------------------------------------------------------
 // RAII cleanup guard
@@ -39,7 +40,7 @@ pub(super) struct LiveMeta {
     pub peer: String,
     pub user: String,
     pub host: String,
-    pub obfuscation: &'static str,
+    pub transport: &'static str,
     pub shell: &'static str,
     pub started: u64,
     pub last_cmd: String,
@@ -50,10 +51,9 @@ pub(super) struct LiveMeta {
 impl LiveMeta {
     pub fn new(
         session_id: &str,
-        peer: &std::net::SocketAddr,
+        transport: &TransportInfo,
         user: &str,
         host: &str,
-        obfuscation: ObfuscationLevel,
         shell_type: ShellType,
     ) -> Self {
         let started = std::time::SystemTime::now()
@@ -62,10 +62,10 @@ impl LiveMeta {
             .as_secs();
         Self {
             session_id: session_id.to_string(),
-            peer: peer.to_string(),
+            peer: transport.peer.clone(),
             user: user.to_string(),
             host: host.to_string(),
-            obfuscation: prompt::obf_label(obfuscation),
+            transport: transport.kind.as_str(),
             shell: prompt::shell_label(shell_type),
             started,
             last_cmd: String::new(),
@@ -86,12 +86,12 @@ impl LiveMeta {
 
     pub fn persist(&self) {
         let content = format!(
-            "peer={}\nuser={}\nhost={}\nobfuscation={}\nshell={}\n\
+            "peer={}\nuser={}\nhost={}\ntransport={}\nshell={}\n\
              started={}\nlast_cmd={}\nlast_cmd_at={}\ncmd_count={}\n",
             self.peer,
             self.user,
             self.host,
-            self.obfuscation,
+            self.transport,
             self.shell,
             self.started,
             self.last_cmd,
@@ -132,20 +132,18 @@ pub(super) enum SessionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::ObfuscationLevel;
     use crate::cli::ShellType;
+    use crate::transport::{TransportCaps, TransportKind};
 
     #[test]
     fn live_meta_record_cmd_increments() {
-        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
-        let mut m = LiveMeta::new(
-            "__test_meta__",
-            &addr,
-            "root",
-            "box",
-            ObfuscationLevel::Heavy,
-            ShellType::Linux,
+        let info = TransportInfo::new(
+            TransportKind::Ssh,
+            "127.0.0.1:9999",
+            TransportCaps::pty(),
         );
+        let mut m = LiveMeta::new("__test_meta__", &info, "root", "box", ShellType::Linux);
+        assert_eq!(m.transport, "ssh");
         assert_eq!(m.cmd_count, 0);
         m.record_cmd("ls");
         assert_eq!(m.cmd_count, 1);
@@ -156,15 +154,12 @@ mod tests {
 
     #[test]
     fn live_meta_strips_newlines() {
-        let addr: std::net::SocketAddr = "127.0.0.1:9999".parse().unwrap();
-        let mut m = LiveMeta::new(
-            "__test_meta2__",
-            &addr,
-            "u",
-            "h",
-            ObfuscationLevel::Light,
-            ShellType::Auto,
+        let info = TransportInfo::new(
+            TransportKind::Reverse,
+            "127.0.0.1:9999",
+            TransportCaps::reverse(),
         );
+        let mut m = LiveMeta::new("__test_meta2__", &info, "u", "h", ShellType::Auto);
         m.record_cmd("echo\nhello");
         assert!(!m.last_cmd.contains('\n'));
         let _ = std::fs::remove_file(agent::info_path("__test_meta2__"));

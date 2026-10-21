@@ -91,6 +91,9 @@ pub fn display_output(data: &[u8]) -> String {
             }
         }
     }
+    // SAFETY: We only push bytes from the input, which may contain invalid UTF-8.
+    // from_utf8_lossy handles this correctly, returning a Cow that borrows when
+    // valid or allocates replacements when invalid.
     String::from_utf8_lossy(&result).into_owned()
 }
 
@@ -148,7 +151,6 @@ pub fn clean_output(data: &[u8]) -> String {
             }
         }
     }
-
     String::from_utf8_lossy(&cleaned).into_owned()
 }
 

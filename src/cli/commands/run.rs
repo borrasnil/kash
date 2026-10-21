@@ -2,7 +2,7 @@
 //!
 //! Small scripts go inline as a single-line base64 wrapper; larger ones
 //! upload to a remote temp file first. Either way the payload runs
-//! verbatim on the target (never obfuscated) and output is framed by the
+//! verbatim on the target and output is framed by the
 //! usual `exec` markers, so plain `print`/`echo` is the whole protocol.
 
 use std::collections::HashMap;

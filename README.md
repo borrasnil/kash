@@ -30,7 +30,7 @@ cargo install --path .
 
 ```console
 $ kash -h
-Reverse shell handler with obfuscation and session management
+Reverse shell handler with session management
 
 Usage: kash <COMMAND>
 
@@ -45,6 +45,8 @@ Commands:
   download  Download a file from a running session's remote system
   run       Run a script module in a running session
   modules   List available script modules
+  ssh       Connect to a remote SSH server and manage it like a session
+  winrm     Connect to a Windows host over WinRM and manage it like a session
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -65,7 +67,6 @@ kash listen 4444 -d
 ```console
   kash  ────────────────────────────  v0.3.0  daemon
 
-  obfuscation  : none
   shell type   : auto
   listener     : 0.0.0.0:4444
   session id   : <name>
@@ -96,8 +97,8 @@ kash attach monkey
 
 ```bash
 kash ps
-# SESSION     PEER                    IDENTITY              OBFUSCATION   SHELL
-# monkey      192.168.1.100:55705     www-data@targetbox    heavy         linux
+# SESSION     PEER                    IDENTITY              TRANSPORT   SHELL
+# monkey      192.168.1.100:55705     www-data@targetbox    reverse     linux
 
 kash ps -q            # IDs only — for scripts
 kash ps --json        # full metadata as JSON
@@ -106,7 +107,7 @@ kash inspect monkey
 #   Session       monkey
 #   Peer          192.168.1.100:55705
 #   Identity      www-data@targetbox
-#   Obfuscation   heavy
+#   Transport     reverse
 #   Shell         linux
 #   Started       2026-07-01 14:30:22 UTC  (42m ago)
 #   Commands      17
@@ -183,14 +184,50 @@ kash kill monkey
 
 The session exits gracefully and its `/tmp/.shh-monkey.{sock,info}` files are removed. `ps` discovers sessions by scanning `/tmp/.shh-*.sock`, so no daemon is needed.
 
-### Obfuscation levels
+### SSH sessions
 
-| Level | Technique |
-|---|---|
-| `none` | Commands sent verbatim. **Default**, safest. |
-| `light` | `""` injection between characters |
-| `medium` | Random variant: temp-file eval, base64, printf hex, `$0 -c` |
-| `heavy` | Random variant: double/triple base64, `/dev/shm` staging, printf octal |
+Instead of waiting for a reverse shell, connect out to a server over SSH.
+The session behaves identically (`ps`/`exec`/`attach`/`upload`/`download`/`run`):
 
-Windows targets always use pass-through. `light`/`medium`/`heavy` break multiline commands and can choke on single quotes — raise the level only when you need it.
-It uses [boo](https://github.com/borrasnil/boo) as the obfuscation library. **WIP**
+```bash
+kash ssh root@10.0.0.5 -p 2222 -i ~/.ssh/id_ed25519 -d
+kash ssh user@host --password            # interactive password prompt
+kash ssh user@host --strict-host-key-checking   # reject unknown host keys
+```
+
+Auth chain: `--identity` file (supports `~` and passphrase prompts) → ssh-agent → `--password` prompt. Host keys are checked against `~/.ssh/known_hosts`: known keys pass silently, changed keys always abort, unknown keys are trusted on first use (and saved) unless `--strict-host-key-checking` is given. Password auth needs a terminal — use keys or an agent for `-d` background sessions.
+
+### Transports
+
+Every transport implements the same session contract (`ps`/`exec`/`attach`/`upload`/`download`/`run`/`kill`), differing only in capabilities:
+
+| Transport | Command | PTY | Notes |
+|---|---|---|---|
+| Reverse shell | `kash listen 4444` | Upgraded via `pty.spawn` | Original mode |
+| SSH | `kash ssh user@host` | Native (`request_pty`) | Keys, agent, password; known_hosts verified |
+| WinRM | `kash winrm Admin@host` | None (handler mode) | NTLM/Basic over HTTP(S); persistent PowerShell REPL |
+
+### WinRM sessions
+
+Connect to a Windows host with WinRM enabled (`winrm quickconfig` on the
+target, ideally over HTTPS with a trusted cert):
+
+```bash
+kash winrm Admin@10.0.0.5 -d                                  # NTLM, port 5985
+kash winrm Admin@host --ssl --password                        # HTTPS, port 5986
+kash winrm Admin@host --auth basic --ssl --insecure           # self-signed cert
+kash winrm Admin@host --shell cmd                             # cmd.exe instead of PowerShell
+```
+
+Credentials resolve as: `--password` prompt, else `WINRM_PASSWORD` (the
+only option for `-d`, inherited by the background child), else an
+interactive prompt (needs a terminal). `DOMAIN\Admin` logins are split
+for NTLM automatically. There is no PTY, so sessions stay in handler
+mode — `exec`/`upload`/`download`/`run` all work; `pty`/`upgrade` report
+unavailable. CTRL+C in handler mode sends a WinRM signal to the running
+command.
+
+Live-test checklist (needs a Windows host; CI covers the protocol against
+a mock SOAP server in `tests/winrm_test.rs`): NTLM handshake, REPL echo
+under real PowerShell, marker exit codes, 300KB transfer roundtrip,
+`--shell cmd` markers, `--ssl --insecure` against a self-signed cert.

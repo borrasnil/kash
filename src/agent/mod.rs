@@ -56,8 +56,7 @@ pub const DOWNLOAD_CMD_PREFIX: &str = "__SHHANDLER_DOWNLOAD__\x00";
 
 /// IPC prefix for module scripts: `"__SHHANDLER_RUN__\x00{display}\x00{cmd}"`.
 ///
-/// `{cmd}` is a single line run **verbatim** (never obfuscated —
-/// multiline and quoting break under light/medium/heavy levels).
+/// `{cmd}` is a single line run **verbatim**.
 /// `{display}` (e.g. `run enum-users`) is shown in the terminal banner and
 /// recorded in session history instead of the raw payload.
 pub const RUN_CMD_PREFIX: &str = "__SHHANDLER_RUN__\x00";
@@ -72,7 +71,9 @@ pub struct SessionInfo {
     pub peer: String,
     pub user: String,
     pub host: String,
-    pub obfuscation: String,
+    /// How the session was established (`reverse` | `ssh` | `winrm`;
+    /// `"?"` for sessions started by older binaries).
+    pub transport: String,
     pub shell: String,
     /// Unix epoch of session start (0 = unknown).
     pub started: u64,
@@ -113,7 +114,7 @@ pub fn read_session_info(id: &str) -> SessionInfo {
         peer: "?".to_string(),
         user: "?".to_string(),
         host: "?".to_string(),
-        obfuscation: "?".to_string(),
+        transport: "?".to_string(),
         shell: "?".to_string(),
         started: 0,
         last_cmd: String::new(),
@@ -128,7 +129,7 @@ pub fn read_session_info(id: &str) -> SessionInfo {
                     "peer" => info.peer = v.to_string(),
                     "user" => info.user = v.to_string(),
                     "host" => info.host = v.to_string(),
-                    "obfuscation" => info.obfuscation = v.to_string(),
+                    "transport" => info.transport = v.to_string(),
                     "shell" => info.shell = v.to_string(),
                     "started" => info.started = v.parse().unwrap_or(0),
                     "last_cmd" => info.last_cmd = v.to_string(),

@@ -8,6 +8,8 @@
 //! * File transfer coordination
 
 mod display;
+pub mod frame;
+pub mod id;
 mod meta;
 mod state;
 
@@ -21,22 +23,22 @@ use crossterm::{
     terminal::{self, Clear, ClearType},
 };
 use futures_util::StreamExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::agent::{AgentCommand, AgentResponse};
-use crate::cli::{ObfuscationLevel, ShellType};
+use crate::cli::ShellType;
 use crate::terminal::line_editor::{LineAction, LineEditor};
-use crate::obfuscation::ObfuscationStrategy;
 use crate::output::{clean_output, display_output};
 use crate::prompt;
 use crate::terminal::RawModeGuard;
+use crate::transport::{BoxReader, BoxWriter, RemoteShell, TransportCaps, TransportInfo};
 use crate::util::{key_to_bytes, raw_normalize};
 
 use crate::{agent, transfer};
 
 use display::{clear_input, redraw_input};
+use frame::{agent_command, framed_output, probe_command};
 use meta::{execute_raw_meta, last_line, parse_meta, parse_meta_raw, strip_done_marker, strip_start_marker};
 use state::{CleanupGuard, DisplayState, LiveMeta, SessionState};
 
@@ -44,14 +46,18 @@ use state::{CleanupGuard, DisplayState, LiveMeta, SessionState};
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// Takes [`BoxReader`]/[`BoxWriter`] rather than generic stream types so the
+/// bulk of the loop compiles once regardless of transport (reverse, SSH,
+/// WinRM, …). Each call site boxes its concrete streams; the trait-object
+/// indirection costs one virtual call per read/write and shrinks the
+/// binary by tens of KiB per added transport.
 pub async fn run_session(
-    stream: TcpStream,
-    peer_addr: std::net::SocketAddr,
-    engine: &(dyn ObfuscationStrategy + Sync),
-    obfuscation: ObfuscationLevel,
+    mut reader: BoxReader,
+    mut writer: BoxWriter,
     shell_type: ShellType,
     session_id: &str,
     headless: bool,
+    transport: TransportInfo,
 ) -> Result<(), anyhow::Error> {
     // Headless mode (daemon child): no controlling terminal — skip raw mode.
     let mut raw_guard: Option<RawModeGuard> = if headless {
@@ -61,20 +67,18 @@ pub async fn run_session(
     };
     let mut stdout = io::stdout();
 
-    let (mut reader, mut writer) = stream.into_split();
-
-    write!(stdout, "\r\n{}\r\n\r\n", prompt::banner_connected(&peer_addr, session_id))?;
+    write!(stdout, "\r\n{}\r\n\r\n", prompt::banner_connected(&transport.peer, session_id))?;
     stdout.flush()?;
 
     // Probe remote identity.
     write!(stdout, "\x1b[2m  probing identity...\x1b[0m")?;
     stdout.flush()?;
-    let (user, host) = probe_identity(&mut reader, &mut writer).await;
+    let (user, host) = probe_identity(&mut reader, &mut writer, transport.shell).await;
     queue!(stdout, cursor::MoveToColumn(0), Clear(ClearType::CurrentLine))?;
     stdout.flush()?;
 
     let mut meta =
-        LiveMeta::new(session_id, &peer_addr, &user, &host, obfuscation, shell_type);
+        LiveMeta::new(session_id, &transport, &user, &host, shell_type);
     meta.persist();
     let _cleanup = CleanupGuard::new(session_id);
 
@@ -85,15 +89,18 @@ pub async fn run_session(
         stdout.flush()?;
     }
 
-    // For Linux/Auto targets: automatically upgrade to a PTY and enter raw mode.
+    // For PTY-capable targets: automatically upgrade to a PTY and enter raw
+    // mode, unless the transport already arrives with one (SSH, K8s).
     // stty sets the terminal size; then we spawn a pty shell via python3, python,
     // or script — whichever is available.  Even if all three fail the raw-mode
     // passthrough still works; interactive programs just won't have full PTY
     // semantics (user can type `upgrade` again later, or `pty` to re-enter raw mode).
     //
-    // Windows targets skip the upgrade and use line-editor mode instead.
-    let auto_raw = shell_type != ShellType::Windows;
-    if auto_raw {
+    // Transports without a PTY (WinRM) and Windows targets skip the upgrade
+    // and use line-editor mode instead.
+    let auto_raw = shell_type != ShellType::Windows && transport.caps.has_pty;
+    let needs_upgrade = auto_raw && !transport.caps.starts_with_pty;
+    if needs_upgrade {
         // Send PTY upgrade command. Do NOT include `stty` here — the PTY
         // isn't ready yet and stty will fail with "Inappropriate ioctl for
         // device". The delayed stty timer (1.5 s) handles sizing later.
@@ -107,6 +114,12 @@ pub async fn run_session(
         let _ = writer.flush().await;
         write!(stdout, "\x1b[2m  [PTY mode — upload/download work directly; CTRL+Q for handler]\x1b[0m\r\n")?;
         stdout.flush()?;
+    } else if auto_raw && transport.caps.starts_with_pty {
+        // Transport already has a server-side PTY — no upgrade needed.
+        write!(stdout, "\x1b[2m  [PTY mode — upload/download work directly; CTRL+Q for handler]\x1b[0m\r\n")?;
+        stdout.flush()?;
+        let _ = writer.write_all(b"\n").await;
+        let _ = writer.flush().await;
     } else {
         // Windows: send a newline to get the first PS1.
         let _ = writer.write_all(b"\n").await;
@@ -127,6 +140,10 @@ pub async fn run_session(
     let mut editor = LineEditor::new();
     let mut net_buf = vec![0u8; 8192];
     let mut state = SessionState::Interactive;
+    // Watchdog deadline for AgentCollecting state.  Set when a command is
+    // injected, cleared when output is fully collected.  A 300-second timeout
+    // prevents a hung remote command from growing the buffer without bound.
+    let mut agent_deadline: Option<tokio::time::Instant> = None;
     let mut should_exit = false;
     // Detach/attach state.
     let mut terminal_active = !headless;
@@ -213,12 +230,13 @@ pub async fn run_session(
                         } else {
                             let prev_raw = raw_mode;
                             should_exit = handle_le_key(
-                                key, &mut state, engine, &mut writer, &mut stdout,
+                                key, &mut state, &mut writer, &mut stdout,
                                 &mut prompt_display, &mut prompt_vis,
                                 &mut editor, &mut display_state,
                                 &mut meta, &mut raw_mode, &mut reader,
                                 &mut ctrl_c_exit_armed,
                                 &mut terminal_active, session_id, shell_type,
+                                transport.caps,
                             ).await?;
                             // Clear shadow buffer when switching into raw mode.
                             if !prev_raw && raw_mode {
@@ -280,6 +298,26 @@ pub async fn run_session(
                     SessionState::AgentCollecting { nonce, .. } => Some(nonce.clone()),
                     _ => None,
                 };
+
+                // Guard: if the agent buffer has grown beyond 64 MiB, send an error
+                // and reset state immediately rather than letting it grow further.
+                {
+                    const AGENT_BUFFER_CAP: usize = 64 * 1024 * 1024;
+                    let overflowed = matches!(&state,
+                        SessionState::AgentCollecting { buffer, .. } if buffer.len() > AGENT_BUFFER_CAP
+                    );
+                    if overflowed {
+                        agent_deadline = None;
+                        if let SessionState::AgentCollecting { response_tx, .. } =
+                            std::mem::replace(&mut state, SessionState::Interactive)
+                        {
+                            let _ = response_tx.send(AgentResponse {
+                                output: "ERROR: agent command output exceeded 64 MiB limit\n".to_string(),
+                                exit_code: 1,
+                            });
+                        }
+                    }
+                }
 
                 // Update agent buffer (ANSI-stripped) and detect the done marker.
                 // This runs regardless of terminal/attach state so that exec works
@@ -361,6 +399,7 @@ pub async fn run_session(
                     {
                         let _ = response_tx.send(AgentResponse { output, exit_code });
                     }
+                    agent_deadline = None;
                     if terminal_active && !raw_mode {
                         display_state = redraw_input(
                             &mut stdout, &prompt_display, &prompt_vis, &editor, None,
@@ -499,9 +538,8 @@ pub async fn run_session(
                 }
 
                 // Show the agent-command banner when the local terminal is active.
-                // Module scripts (`RUN_CMD_PREFIX`) run verbatim — never
-                // obfuscated — and show their display name instead of the
-                // raw payload.
+                // Module scripts (`RUN_CMD_PREFIX`) show their display name
+                // instead of the raw payload. All commands run verbatim.
                 let (payload, banner_cmd) = match cmd.strip_prefix(agent::RUN_CMD_PREFIX) {
                     Some(rest) => match rest.split_once('\x00') {
                         Some((display, raw)) => (raw.to_string(), display.to_string()),
@@ -513,7 +551,7 @@ pub async fn run_session(
                             continue;
                         }
                     },
-                    None => (engine.obfuscate(&cmd), cmd.clone()),
+                    None => (cmd.clone(), cmd.clone()),
                 };
                 if terminal_active {
                     if raw_mode {
@@ -529,15 +567,16 @@ pub async fn run_session(
 
                 let nonce = crate::util::generate_nonce();
                 let payload_cmd = payload;
-                let full_cmd = if raw_mode {
-                    format!(
-                        "stty -echo 2>/dev/null; echo 'SH_CMD_START_{nonce}'; \
-                         {payload_cmd}; _shec=$?; \
-                         stty echo 2>/dev/null; echo 'SH_CMD_DONE_{nonce}:'$_shec"
-                    )
-                } else {
-                    format!("{payload_cmd}; echo 'SH_CMD_DONE_{nonce}:'$?")
-                };
+                // Marker framing follows the remote dialect; the START marker
+                // is included whenever leading noise is possible (raw PTY
+                // echo, non-POSIX prompts, PTY-less transports).
+                let full_cmd = agent_command(
+                    transport.shell,
+                    &payload_cmd,
+                    &nonce,
+                    raw_mode,
+                    transport.caps.has_pty,
+                );
                 writer.write_all(full_cmd.as_bytes()).await?;
                 writer.write_all(b"\n").await?;
                 writer.flush().await?;
@@ -547,8 +586,10 @@ pub async fn run_session(
                     nonce,
                     buffer: String::new(),
                     response_tx,
-                    pty_mode: raw_mode,
+                    pty_mode: framed_output(raw_mode, transport.caps.has_pty, transport.shell),
                 };
+                // Arm the 300-second watchdog.
+                agent_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(300));
 
                 if terminal_active {
                     if raw_mode {
@@ -557,6 +598,40 @@ pub async fn run_session(
                         write!(stdout, "\x1b[2m  [agent running...]\x1b[0m")?;
                     }
                     stdout.flush()?;
+                }
+            }
+
+            // ── Agent command timeout ─────────────────────────────────────────
+            // Fires 300 s after a command was injected if the done marker never
+            // arrived.  A new sleep is created each select! iteration but
+            // tokio::time::sleep_until is cheap and the timer only ticks once.
+            _ = async {
+                match agent_deadline {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                agent_deadline = None;
+                if let SessionState::AgentCollecting { response_tx, .. } =
+                    std::mem::replace(&mut state, SessionState::Interactive)
+                {
+                    if terminal_active {
+                        if raw_mode {
+                            write!(stdout, "\r\n\x1b[1;33m[!]\x1b[0m agent command timed out (300 s)\r\n")?;
+                        } else {
+                            clear_input(&mut stdout, display_state)?;
+                            display_state = DisplayState::default();
+                            write!(stdout, "\x1b[1;33m[!]\x1b[0m agent command timed out (300 s)\r\n")?;
+                        }
+                        stdout.flush()?;
+                        if !raw_mode {
+                            display_state = redraw_input(&mut stdout, &prompt_display, &prompt_vis, &editor, None)?;
+                        }
+                    }
+                    let _ = response_tx.send(AgentResponse {
+                        output: "ERROR: agent command timed out (300 s)\n".to_string(),
+                        exit_code: 124,
+                    });
                 }
             }
 
@@ -607,7 +682,7 @@ async fn handle_raw_key(
     raw_mode: &mut bool,
     last_was_cr: &mut bool,
     raw_line_buf: &mut Vec<u8>,
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    writer: &mut (dyn AsyncWrite + Unpin + Send),
     stdout: &mut io::Stdout,
     prompt_display: &mut String,
     prompt_vis: &mut String,
@@ -702,8 +777,7 @@ async fn handle_raw_key(
 async fn handle_le_key(
     key: KeyEvent,
     state: &mut SessionState,
-    engine: &(dyn ObfuscationStrategy + Sync),
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    writer: &mut (dyn AsyncWrite + Unpin + Send),
     stdout: &mut io::Stdout,
     prompt_display: &mut String,
     prompt_vis: &mut String,
@@ -711,11 +785,12 @@ async fn handle_le_key(
     display_state: &mut DisplayState,
     meta: &mut LiveMeta,
     raw_mode: &mut bool,
-    reader: &mut tokio::net::tcp::OwnedReadHalf,
+    reader: &mut (dyn AsyncRead + Unpin + Send),
     ctrl_c_exit_armed: &mut bool,
     terminal_active: &mut bool,
     session_id: &str,
     shell_type: ShellType,
+    caps: TransportCaps,
 ) -> anyhow::Result<bool> {
     let action = editor.handle_key(key);
 
@@ -833,6 +908,14 @@ async fn handle_le_key(
                         redraw_input(stdout, prompt_display, prompt_vis, editor, None)?;
                 }
                 Some(meta::MetaAction::Pty) => {
+                    if !caps.has_pty {
+                        // PTY-less transports (WinRM) have no raw mode.
+                        write!(stdout, "\x1b[2m  [no PTY on this transport — staying in handler mode]\x1b[0m\r\n")?;
+                        stdout.flush()?;
+                        *display_state =
+                            redraw_input(stdout, prompt_display, prompt_vis, editor, None)?;
+                        return Ok(false);
+                    }
                     // Switch to raw PTY passthrough — no upgrade sent.
                     write!(
                         stdout,
@@ -851,8 +934,14 @@ async fn handle_le_key(
                     *display_state = DisplayState::default();
                 }
                 Some(meta::MetaAction::Upgrade) => {
+                    if !caps.has_pty {
+                        write!(stdout, "\x1b[2m  [no PTY on this transport — upgrade unavailable]\x1b[0m\r\n")?;
+                        stdout.flush()?;
+                        *display_state =
+                            redraw_input(stdout, prompt_display, prompt_vis, editor, None)?;
+                        return Ok(false);
+                    }
                     // Send PTY upgrade then switch to raw mode.
-                    // Always sent raw (no obfuscation) — reliability over stealth for setup.
                     write!(stdout, "\x1b[2m  [sending PTY upgrade...]\x1b[0m\r\n")?;
                     stdout.flush()?;
                     let upgrade = concat!(
@@ -900,8 +989,8 @@ async fn handle_le_key(
                 }
                 None => {
                     if !trimmed.is_empty() {
-                        let obfuscated = engine.obfuscate(&line);
-                        writer.write_all(obfuscated.as_bytes()).await?;
+                        // Commands are sent verbatim.
+                        writer.write_all(line.as_bytes()).await?;
                         writer.write_all(b"\n").await?;
                         writer.flush().await?;
                         meta.record_cmd(&trimmed);
@@ -943,11 +1032,12 @@ fn cancel_agent(state: &mut SessionState, exit_code: i32) {
 // ---------------------------------------------------------------------------
 
 async fn probe_identity(
-    reader: &mut tokio::net::tcp::OwnedReadHalf,
-    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    reader: &mut (dyn AsyncRead + Unpin + Send),
+    writer: &mut (dyn AsyncWrite + Unpin + Send),
+    shell: RemoteShell,
 ) -> (String, String) {
-    let probe = b"printf 'SHIDENTITY:%s:%s\\n' \"$(whoami)\" \"$(hostname -s)\"\n";
-    if writer.write_all(probe).await.is_err() {
+    let probe = probe_command(shell);
+    if writer.write_all(probe.as_bytes()).await.is_err() {
         return ("?".to_string(), "?".to_string());
     }
     let _ = writer.flush().await;
@@ -984,27 +1074,17 @@ async fn probe_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::ObfuscationLevel;
-    use crate::obfuscation::create_strategy;
+    use crate::transport::{TransportCaps, TransportKind};
 
-    struct MockObfuscator;
-    impl ObfuscationStrategy for MockObfuscator {
-        fn obfuscate(&self, cmd: &str) -> String {
-            format!("OBF({cmd})")
-        }
+    #[test]
+    fn reverse_caps_need_upgrade() {
+        let caps = TransportCaps::reverse();
+        assert!(caps.has_pty && !caps.starts_with_pty && caps.supports_resize);
     }
 
-    #[tokio::test]
-    async fn mock_obfuscator_works() {
-        assert_eq!(MockObfuscator.obfuscate("ls"), "OBF(ls)");
-    }
-
-    #[tokio::test]
-    async fn strategy_is_send_sync() {
-        fn assert_send<T: Send>(_: &T) {}
-        fn assert_sync<T: Sync>(_: &T) {}
-        let e = create_strategy(ObfuscationLevel::Light, crate::cli::ShellType::Linux);
-        assert_send(&e);
-        assert_sync(&e);
+    #[test]
+    fn transport_info_carries_peer() {
+        let info = TransportInfo::new(TransportKind::Ssh, "root@h:22", TransportCaps::pty());
+        assert_eq!(info.peer, "root@h:22");
     }
 }

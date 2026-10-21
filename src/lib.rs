@@ -5,13 +5,16 @@
 //! * [`cli`] — argument parsing and command handlers
 //! * [`session`] — the core interactive session event loop
 //! * [`agent`] — Unix-socket IPC for external callers (agents, LLMs)
-//! * [`obfuscation`] — command obfuscation strategies
 //! * [`transfer`] — file upload/download via the remote shell
 //! * [`update`] — update notification (crates.io version check)
 //! * [`terminal`] — raw mode guard and line editor
 //! * [`output`] — ANSI/control-character cleaning
 //! * [`prompt`] — banners and help text
 //! * [`listen`] — TCP listener for incoming connections
+//! * [`ssh`] — outbound SSH client (`kash ssh`)
+//! * [`transport`] — shared transport abstraction (kinds, capabilities,
+//!   [`Transport`](transport::Transport) trait, daemon spawner)
+//! * [`winrm`] — Windows Remote Management (`kash winrm`)
 //! * [`error`] — typed error enum
 //! * [`util`] — shared utility functions
 
@@ -19,15 +22,17 @@ pub mod agent;
 pub mod cli;
 pub mod error;
 pub mod listen;
-pub mod obfuscation;
 pub mod output;
 pub mod prompt;
 pub mod script;
 pub mod session;
+pub mod ssh;
 pub mod terminal;
 pub mod transfer;
+pub mod transport;
 pub mod update;
 pub mod util;
+pub mod winrm;
 
 use clap::Parser;
 
@@ -50,5 +55,7 @@ pub async fn run() -> anyhow::Result<()> {
         Command::Download(args) => commands::download::cmd_download(args).await,
         Command::Run(args) => commands::run::cmd_run(args).await,
         Command::Modules(args) => commands::modules::cmd_modules(args),
+        Command::Ssh(args) => commands::ssh::cmd_ssh(args).await,
+        Command::Winrm(args) => commands::winrm::cmd_winrm(args).await,
     }
 }

@@ -13,18 +13,18 @@ use crate::cli::ShellType;
 use crate::util::{base64_encode, gen_temp_nonce};
 
 /// Upload a local file to the remote system using a heredoc-streamed base64 payload.
-pub async fn upload<R, W>(
-    reader: &mut R,
-    writer: &mut W,
+///
+/// Takes trait-object references rather than generic stream types so the
+/// ~12 KiB function body compiles once per shell dialect instead of once per
+/// transport × dialect. See [`crate::transport::BoxReader`] / [`crate::transport::BoxWriter`].
+pub async fn upload(
+    reader: &mut (dyn AsyncRead + Unpin),
+    writer: &mut (dyn AsyncWrite + Unpin),
     local_path: &str,
     remote_path: &str,
     stdout: &mut io::Stdout,
     shell_type: ShellType,
-) -> anyhow::Result<()>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
+) -> anyhow::Result<()> {
     if shell_type == ShellType::Windows {
         return super::windows::upload_windows(reader, writer, local_path, remote_path, stdout).await;
     }
@@ -161,7 +161,7 @@ where
     let exit_code: i32 = full_response
         .lines()
         .find(|l| l.contains(&up_marker))
-        .and_then(|l| l.splitn(2, ':').nth(1))
+        .and_then(|l| l.split_once(':').map(|x| x.1))
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(1);
 

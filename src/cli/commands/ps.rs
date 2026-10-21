@@ -26,12 +26,12 @@ pub fn cmd_ps(args: PsArgs) -> anyhow::Result<()> {
                 print!(",");
             }
             print!(
-                "{{\"id\":{},\"peer\":{},\"user\":{},\"host\":{},\"obfuscation\":{},\"shell\":{}}}",
+                "{{\"id\":{},\"peer\":{},\"user\":{},\"host\":{},\"transport\":{},\"shell\":{}}}",
                 json_str(&s.id),
                 json_str(&s.peer),
                 json_str(&s.user),
                 json_str(&s.host),
-                json_str(&s.obfuscation),
+                json_str(&s.transport),
                 json_str(&s.shell),
             );
         }
@@ -43,13 +43,13 @@ pub fn cmd_ps(args: PsArgs) -> anyhow::Result<()> {
     const W_ID: usize = 10;
     const W_PEER: usize = 22;
     const W_IDENTITY: usize = 20;
-    const W_OBF: usize = 12;
+    const W_TRANSPORT: usize = 9;
 
     println!(
-        "\x1b[2m{:<W_ID$}  {:<W_PEER$}  {:<W_IDENTITY$}  {:<W_OBF$}  {}\x1b[0m",
-        "SESSION", "PEER", "IDENTITY", "OBFUSCATION", "SHELL"
+        "\x1b[2m{:<W_ID$}  {:<W_PEER$}  {:<W_IDENTITY$}  {:<W_TRANSPORT$}  SHELL\x1b[0m",
+        "SESSION", "PEER", "IDENTITY", "TRANSPORT"
     );
-    println!("{}", "\x1b[2m─\x1b[0m".repeat(W_ID + W_PEER + W_IDENTITY + W_OBF + 20));
+    println!("{}", "\x1b[2m─\x1b[0m".repeat(W_ID + W_PEER + W_IDENTITY + W_TRANSPORT + 20));
 
     for s in &sessions {
         let identity = if s.user == "?" && s.host == "?" {
@@ -58,8 +58,8 @@ pub fn cmd_ps(args: PsArgs) -> anyhow::Result<()> {
             format!("{}@{}", s.user, s.host)
         };
         println!(
-            "\x1b[1;36m{:<W_ID$}\x1b[0m  \x1b[1;37m{:<W_PEER$}\x1b[0m  {:<W_IDENTITY$}  {:<W_OBF$}  {}",
-            s.id, s.peer, identity, s.obfuscation, s.shell,
+            "\x1b[1;36m{:<W_ID$}\x1b[0m  \x1b[1;37m{:<W_PEER$}\x1b[0m  {:<W_IDENTITY$}  {:<W_TRANSPORT$}  {}",
+            s.id, s.peer, identity, s.transport, s.shell,
         );
     }
 

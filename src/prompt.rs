@@ -4,9 +4,7 @@
 //! sequences for colour and styling. The caller is responsible for converting
 //! `\n` to `\r\n` when printing in raw mode.
 
-use std::net::SocketAddr;
-
-use crate::cli::{ObfuscationLevel, ShellType};
+use crate::cli::ShellType;
 
 // -- ANSI palette --------------------------------------------------------------
 
@@ -18,24 +16,6 @@ const GREEN: &str = "\x1b[1;32m";
 const YELLOW: &str = "\x1b[1;33m";
 const CYAN: &str = "\x1b[1;36m";
 const WHITE: &str = "\x1b[1;37m";
-
-fn obf_color(level: ObfuscationLevel) -> &'static str {
-    match level {
-        ObfuscationLevel::None => "\x1b[2m",
-        ObfuscationLevel::Light => "\x1b[1;32m",
-        ObfuscationLevel::Medium => "\x1b[1;33m",
-        ObfuscationLevel::Heavy => "\x1b[1;31m",
-    }
-}
-
-pub fn obf_label(level: ObfuscationLevel) -> &'static str {
-    match level {
-        ObfuscationLevel::None => "none",
-        ObfuscationLevel::Light => "light",
-        ObfuscationLevel::Medium => "medium",
-        ObfuscationLevel::Heavy => "heavy",
-    }
-}
 
 pub fn shell_label(shell: ShellType) -> &'static str {
     match shell {
@@ -51,18 +31,14 @@ pub fn shell_label(shell: ShellType) -> &'static str {
 pub fn startup_banner(
     listen: &str,
     port: u16,
-    level: ObfuscationLevel,
     shell: ShellType,
     session_id: &str,
 ) -> String {
-    let oc = obf_color(level);
-    let ol = obf_label(level);
     let sl = shell_label(shell);
     let ver = env!("CARGO_PKG_VERSION");
     format!(
         "\n  {WHITE}kash{RST}  {DIM}─────────────────────────────{RST}  {DIM}v{ver}{RST}\n\
          \n\
-         {DIM}  obfuscation  :{RST}  {oc}{ol}{RST}\n\
          {DIM}  shell type   :{RST}  {CYAN}{sl}{RST}\n\
          {DIM}  listener     :{RST}  {BOLD}{listen}:{port}{RST}\n\
          {DIM}  session id   :{RST}  {CYAN}{session_id}{RST}\n\
@@ -72,9 +48,30 @@ pub fn startup_banner(
 }
 
 /// `[+] shell connected from <addr>  •  session: <id>`
-pub fn banner_connected(peer: &SocketAddr, session_id: &str) -> String {
+pub fn banner_connected(peer: &str, session_id: &str) -> String {
     format!(
         "{GREEN}[+]{RST} shell connected from {WHITE}{peer}{RST}  {DIM}·  session:{RST} {CYAN}{session_id}{RST}"
+    )
+}
+
+/// Startup banner for `kash ssh` (uses `\n`, pre-raw-mode).
+pub fn startup_banner_ssh(
+    user: &str,
+    host: &str,
+    port: u16,
+    shell: ShellType,
+    session_id: &str,
+) -> String {
+    let sl = shell_label(shell);
+    let ver = env!("CARGO_PKG_VERSION");
+    format!(
+        "\n  {WHITE}kash{RST}  {DIM}─────────────────────────────{RST}  {DIM}v{ver}{RST}\n\
+         \n\
+         {DIM}  shell type   :{RST}  {CYAN}{sl}{RST}\n\
+         {DIM}  target       :{RST}  {BOLD}{user}@{host}:{port}{RST}\n\
+         {DIM}  session id   :{RST}  {CYAN}{session_id}{RST}\n\
+         \n\
+         {DIM}  [*] connecting...{RST}\n"
     )
 }
 
@@ -112,23 +109,39 @@ pub fn banner_session_detached(session_id: &str) -> String {
 pub fn startup_banner_daemon(
     listen: &str,
     port: u16,
-    level: ObfuscationLevel,
     shell: ShellType,
     session_id: &str,
 ) -> String {
-    let oc = obf_color(level);
-    let ol = obf_label(level);
     let sl = shell_label(shell);
     let ver = env!("CARGO_PKG_VERSION");
     format!(
         "\n  {WHITE}kash{RST}  {DIM}────────────────────────────{RST}  {DIM}v{ver}  daemon{RST}\n\
          \n\
-         {DIM}  obfuscation  :{RST}  {oc}{ol}{RST}\n\
          {DIM}  shell type   :{RST}  {CYAN}{sl}{RST}\n\
          {DIM}  listener     :{RST}  {BOLD}{listen}:{port}{RST}\n\
          {DIM}  session id   :{RST}  {CYAN}{session_id}{RST}\n\
          \n\
          {DIM}  [*] listening in background — attach with:{RST}  kash attach {session_id}\n"
+    )
+}
+
+/// Startup banner for `kash ssh` daemon mode — printed before the parent exits.
+pub fn startup_banner_ssh_daemon(
+    target: &str,
+    port: u16,
+    shell: ShellType,
+    session_id: &str,
+) -> String {
+    let sl = shell_label(shell);
+    let ver = env!("CARGO_PKG_VERSION");
+    format!(
+        "\n  {WHITE}kash{RST}  {DIM}────────────────────────────{RST}  {DIM}v{ver}  daemon{RST}\n\
+         \n\
+         {DIM}  shell type   :{RST}  {CYAN}{sl}{RST}\n\
+         {DIM}  target       :{RST}  {BOLD}{target}:{port}{RST}\n\
+         {DIM}  session id   :{RST}  {CYAN}{session_id}{RST}\n\
+         \n\
+         {DIM}  [*] connecting in background — attach with:{RST}  kash attach {session_id}\n"
     )
 }
 
@@ -195,8 +208,7 @@ pub fn help_text() -> &'static str {
   \x1b[2m↑ / ↓\x1b[0m           history navigation
   \x1b[2mAlt+Enter\x1b[0m        insert newline for multiline commands
 
-\x1b[1;37mObfuscation levels\x1b[0m
-  \x1b[2m-o\x1b[0m  none \x1b[2m·\x1b[0m \x1b[1;32mlight\x1b[0m \x1b[2m·\x1b[0m \x1b[1;33mmedium\x1b[0m \x1b[2m·\x1b[0m \x1b[1;31mheavy\x1b[0m   \x1b[2m(default: none)\x1b[0m
+ \x1b[1;37mShell type\x1b[0m
   \x1b[2m-s\x1b[0m  auto \x1b[2m·\x1b[0m linux \x1b[2m·\x1b[0m windows              \x1b[2m(default: auto)\x1b[0m
 "
 }
@@ -207,8 +219,7 @@ mod tests {
 
     #[test]
     fn banner_connected_contains_addr_and_session() {
-        let addr: SocketAddr = "10.0.0.5:4444".parse().unwrap();
-        let b = banner_connected(&addr, "abc12345");
+        let b = banner_connected("10.0.0.5:4444", "abc12345");
         assert!(b.contains("10.0.0.5"));
         assert!(b.contains("4444"));
         assert!(b.contains("abc12345"));
@@ -240,11 +251,10 @@ mod tests {
 
     #[test]
     fn startup_banner_contains_session_id() {
-        let s = startup_banner("0.0.0.0", 4444, ObfuscationLevel::Heavy, ShellType::Linux, "deadbeef");
+        let s = startup_banner("0.0.0.0", 4444, ShellType::Linux, "deadbeef");
         assert!(s.contains("kash"));
         assert!(s.contains("deadbeef"));
         assert!(s.contains("4444"));
-        assert!(s.contains("heavy"));
         assert!(s.contains("linux"));
     }
 

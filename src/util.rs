@@ -3,8 +3,8 @@
 //!
 //! Provides standalone functions used across multiple modules:
 //!
-//! * [`base64_encode`] / [`base64_decode`] — used by obfuscation backends
-//!   and the file-transfer module.
+//! * [`base64_encode`] / [`base64_decode`] — used by the file-transfer
+//!   module and script delivery.
 //! * [`key_to_bytes`] / [`raw_normalize`] — shared between the session loop
 //!   and the attach client.
 //! * [`json_str`] — JSON string escaping for `ps --json` and `exec --format json`.

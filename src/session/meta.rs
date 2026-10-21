@@ -11,8 +11,7 @@ use crossterm::{
     queue,
     terminal::{Clear, ClearType},
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::cli::ShellType;
 use crate::prompt;
@@ -84,8 +83,8 @@ pub(super) fn parse_meta(cmd: &str) -> Option<MetaAction> {
 /// Raw mode stays active before and after; caller handles stty resync.
 pub(super) async fn execute_raw_meta(
     action: MetaAction,
-    writer: &mut OwnedWriteHalf,
-    reader: &mut OwnedReadHalf,
+    writer: &mut (dyn AsyncWrite + Unpin + Send),
+    reader: &mut (dyn AsyncRead + Unpin + Send),
     stdout: &mut io::Stdout,
     terminal_active: &mut bool,
     session_id: &str,
@@ -93,16 +92,14 @@ pub(super) async fn execute_raw_meta(
 ) -> anyhow::Result<()> {
     // Drain any pending remote bytes (CTRL+U echo, stale PTY feedback) so they
     // don't corrupt the display after the meta-action completes.
-    {
-        let mut drain = vec![0u8; 4096];
-        loop {
-            match tokio::time::timeout(
-                Duration::from_millis(150),
-                reader.read(&mut drain),
-            ).await {
-                Ok(Ok(n)) if n > 0 => {}
-                _ => break,
-            }
+    let mut drain = vec![0u8; 4096];
+    loop {
+        match tokio::time::timeout(
+            Duration::from_millis(150),
+            reader.read(&mut drain),
+        ).await {
+            Ok(Ok(n)) if n > 0 => {}
+            _ => break,
         }
     }
     write!(stdout, "\r\n")?;

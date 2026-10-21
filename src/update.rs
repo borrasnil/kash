@@ -152,9 +152,7 @@ fn read_cache() -> Option<(String, u64)> {
     if now.saturating_sub(checked_at) > CHECK_TTL_SECS {
         return None; // stale
     }
-    if parse_triplet(&version).is_none() {
-        return None;
-    }
+    parse_triplet(&version)?;
     Some((version, checked_at))
 }
 

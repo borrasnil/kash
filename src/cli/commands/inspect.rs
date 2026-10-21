@@ -26,7 +26,7 @@ pub fn cmd_inspect(args: InspectArgs) -> anyhow::Result<()> {
     println!("  \x1b[2mSession     \x1b[0m  \x1b[1;36m{}\x1b[0m", s.id);
     println!("  \x1b[2mPeer        \x1b[0m  \x1b[1;37m{}\x1b[0m", s.peer);
     println!("  \x1b[2mIdentity    \x1b[0m  {}", identity);
-    println!("  \x1b[2mObfuscation \x1b[0m  {}", s.obfuscation);
+    println!("  \x1b[2mTransport   \x1b[0m  {}", s.transport);
     println!("  \x1b[2mShell       \x1b[0m  {}", s.shell);
     println!();
     if s.started > 0 {

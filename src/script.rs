@@ -6,8 +6,8 @@
 //! placeholders are filled from `--set`.
 //!
 //! Delivery is two-tier: small scripts go inline as a single-line
-//! base64-pipe wrapper (verbatim through the session, never obfuscated);
-//! larger ones upload to a remote temp file and run from there.
+//! base64-pipe wrapper; larger ones upload to a remote temp file and run
+//! from there.
 
 use std::collections::HashMap;
 
