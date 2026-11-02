@@ -2,8 +2,12 @@
 //!
 //! Connects to a remote SSH server via `russh`, opens a session channel with
 //! a PTY, and hands the resulting byte stream to the shared session loop.
-//! Auth chain: explicit `--identity` file → ssh-agent → `--password` prompt.
+//! Argument and auth semantics mirror `ssh(1)`: `-i/-p/-l/-F/-o` flags, a
+//! `~/.ssh/config` parser ([`config`]), and an auth chain of ssh-agent →
+//! identity files (explicit `-i`, config `IdentityFile`, then the default
+//! key probe) → password when a terminal is available.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -13,44 +17,180 @@ use crate::transport::{
     BoxReader, BoxWriter, Transport, TransportCaps, TransportInfo, TransportKind,
 };
 
+pub mod config;
+
 // ---------------------------------------------------------------------------
 // Target parsing
 // ---------------------------------------------------------------------------
 
-/// Parsed `[user@]host`.
+/// Parsed `[user@]host`. The user stays optional until resolution — ssh
+/// fills it from `-l`, ssh_config `User`, then `$USER`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SshTarget {
-    pub user: String,
+    pub user: Option<String>,
     pub host: String,
 }
 
 impl SshTarget {
-    /// Parse `[user@]host`. Empty user/host is an error.
-    /// `default_user` is used when no `user@` prefix is present.
-    pub fn parse(raw: &str, default_user: &str) -> anyhow::Result<Self> {
+    /// Parse `[user@]host`. Empty host is an error.
+    pub fn parse(raw: &str) -> anyhow::Result<Self> {
         let raw = raw.trim();
         if raw.is_empty() {
             anyhow::bail!("empty SSH target — expected [user@]host");
         }
         let (user, host) = match raw.rsplit_once('@') {
-            Some((u, h)) => (u.to_string(), h.to_string()),
-            None => (default_user.to_string(), raw.to_string()),
+            Some((u, h)) => (Some(u.to_string()), h.to_string()),
+            None => (None, raw.to_string()),
         };
-        if user.is_empty() || host.is_empty() {
+        if user.as_ref().is_some_and(String::is_empty) || host.is_empty() {
             anyhow::bail!("invalid SSH target '{raw}' — expected [user@]host");
         }
         Ok(Self { user, host })
     }
 
-    pub fn display(&self, port: u16) -> String {
-        format!("{}@{}:{}", self.user, self.host, port)
+    /// Full peer label with explicit port (`root@10.0.0.5:2222`). Used for
+    /// the `TransportInfo::peer` display string.
+    pub fn display(&self, port: u16, user: &str) -> String {
+        format!("{user}@{}:{port}", self.host)
     }
 }
 
+/// The user to assume for bare `host` targets: `$USER`/`$USERNAME`, with
+/// `"root"` as a last-resort fallback when neither is set.
 pub fn default_local_user() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "root".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Resolution (ssh(1) precedence: CLI > ssh_config > defaults)
+// ---------------------------------------------------------------------------
+
+/// ssh(1)'s default `IdentityFile` list (relative to the home directory).
+const DEFAULT_IDENTITIES: &[&str] = &[
+    ".ssh/id_rsa",
+    ".ssh/id_ecdsa",
+    ".ssh/id_ecdsa_sk",
+    ".ssh/id_ed25519",
+    ".ssh/id_ed25519_sk",
+    ".ssh/id_mldsa44_ed25519",
+];
+
+/// Everything the connect step needs, fully resolved. Mirrors what
+/// `ssh -G <target>` would print for the keywords kash supports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedConnect {
+    /// Auth user: CLI `-l`/`user@` prefix > config `User` > `$USER`.
+    pub user: String,
+    /// Connect host: config `HostName` when set, else the target host.
+    pub host: String,
+    /// Port: CLI `-p` > config `Port` > 22.
+    pub port: u16,
+    /// Identity files in try order (after ssh-agent): CLI `-i`, config
+    /// `IdentityFile`, then existing default key paths.
+    pub identity_files: Vec<String>,
+    /// Config file that was consulted, for diagnostics.
+    pub config_path: Option<PathBuf>,
+}
+
+impl ResolvedConnect {
+    /// ssh-G-style diagnostic listing.
+    pub fn dump(&self) -> String {
+        let mut s = format!(
+            "host {}\nuser {}\nport {}\n",
+            self.host, self.user, self.port
+        );
+        match &self.config_path {
+            Some(p) => s.push_str(&format!("configfile {}\n", p.display())),
+            None => s.push_str("configfile none\n"),
+        }
+        for f in &self.identity_files {
+            s.push_str(&format!("identityfile {f}\n"));
+        }
+        s
+    }
+}
+
+/// Resolve target + CLI flags + parsed ssh_config into one [`ResolvedConnect`].
+///
+/// `home` (when known) scopes default-identity probing to `$HOME`; pass the
+/// real home from the CLI caller, tests pass a fixture dir.
+pub fn resolve_connect(
+    target: &SshTarget,
+    cli_user: Option<&str>,
+    cli_port: Option<u16>,
+    cli_identity: &[String],
+    cfg: &config::SshConfig,
+    home: Option<&Path>,
+) -> ResolvedConnect {
+    // User: CLI (-l or user@ prefix) beats config User, beats $USER.
+    let user = cli_user
+        .map(str::to_string)
+        .or_else(|| target.user.clone())
+        .or_else(|| cfg.user.clone())
+        .unwrap_or_else(default_local_user);
+
+    // Host: config HostName (must be non-empty) overrides the alias.
+    let host = cfg
+        .host_name
+        .clone()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| target.host.clone());
+
+    // Port: explicit CLI value beats config; 0 args are ignored in both.
+    let port = match cli_port {
+        Some(p) if p > 0 => p,
+        _ => {
+            let cfg_port = cfg.port.filter(|p| *p > 0);
+            cfg_port.unwrap_or(22)
+        }
+    };
+
+    // Identity files: CLI -i, then config IdentityFile, then defaults that
+    // exist on disk (ssh warns rather than errors on missing -i paths).
+    let mut identity_files: Vec<String> = cli_identity
+        .iter()
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| expand_tilde(p))
+        .collect();
+    for f in &cfg.identity_files {
+        let expanded = expand_tilde(f);
+        if !identity_files.contains(&expanded) {
+            identity_files.push(expand_tilde(f));
+        }
+    }
+    for f in default_identity_paths(home) {
+        if !identity_files.contains(&f) {
+            identity_files.push(f);
+        }
+    }
+
+    ResolvedConnect {
+        user,
+        host,
+        port,
+        identity_files,
+        config_path: None,
+    }
+}
+
+/// Default identity files that exist under `home`, in ssh(1) order.
+fn default_identity_paths(home: Option<&Path>) -> Vec<String> {
+    let Some(home) = home else {
+        return Vec::new();
+    };
+    DEFAULT_IDENTITIES
+        .iter()
+        .map(|rel| {
+            #[cfg(windows)]
+            let lower_rel = rel.replace('/', "\\");
+            #[cfg(windows)]
+            let rel: &str = &lower_rel;
+            home.join(rel).to_string_lossy().into_owned()
+        })
+        .filter(|p| Path::new(p).is_file())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +208,8 @@ struct Client {
     strict: bool,
 }
 
+/// Path of the user's `~/.ssh/known_hosts` (or `None` without a home
+/// directory, in which case host-key checking is skipped).
 fn known_hosts_path() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -77,6 +219,10 @@ fn known_hosts_path() -> Option<std::path::PathBuf> {
 impl russh::client::Handler for Client {
     type Error = russh::Error;
 
+    /// [`russh::client::Handler::check_server_key`] — the TOFU / strict /
+    /// mismatch logic described on the struct lives here. Certificates are
+    /// accepted with a warning (certificate-based deployments instead of
+    /// plain host keys are rare).
     async fn check_server_key(
         &mut self,
         server_public_key: &russh::keys::PublicKeyOrCertificate,
@@ -133,10 +279,11 @@ impl russh::client::Handler for Client {
 // Connection
 // ---------------------------------------------------------------------------
 
-/// Options for dialling an SSH server. Mirrors `SshArgs` (CLI) without
-/// clap types so `ssh.rs` stays testable.
+/// Options for dialling an SSH server. Mirrors `SshArgs` after resolution
+/// (no clap types) so `ssh.rs` stays testable.
 pub struct ConnectOptions {
-    pub identity: Option<String>,
+    /// Identity files to try in order (after ssh-agent), tilde-expanded.
+    pub identity_files: Vec<String>,
     pub password: bool,
     /// Reject unknown host keys instead of trusting on first use.
     pub strict_host_key_checking: bool,
@@ -153,6 +300,10 @@ pub fn bash_normalize_cmd() -> &'static str {
     "command -v bash >/dev/null 2>&1 && exec bash\n"
 }
 
+/// Try every identity held by the user's ssh-agent (public keys then
+/// certificates). Returns `Ok(true)` on first success, `Ok(false)` when the
+/// agent has identities but none were accepted; connection agent errors
+/// surface as `Err`.
 async fn try_agent_auth(
     handle: &mut russh::client::Handle<Client>,
     user: &str,
@@ -197,12 +348,17 @@ pub fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
+/// Whether an interactive password/passphrase prompt is possible at all —
+/// false for background daemons and piped stdin.
 fn stdin_is_terminal() -> bool {
     use std::io::IsTerminal;
     std::io::stdin().is_terminal()
 }
 
-fn load_identity_key(path: &str) -> anyhow::Result<Arc<russh::keys::PrivateKey>> {
+/// Load a private key from `path` (with `~/` expansion). Passphrase-protected
+/// keys prompt on a terminal via `rpassword` when `allow_prompt`; headless
+/// callers should pass keys pre-unlocked by an ssh-agent or skip.
+fn load_identity_key(path: &str, allow_prompt: bool) -> anyhow::Result<Arc<russh::keys::PrivateKey>> {
     let path = expand_tilde(path);
     if !std::path::Path::new(&path).is_file() {
         anyhow::bail!("identity file not found: '{path}'");
@@ -210,11 +366,11 @@ fn load_identity_key(path: &str) -> anyhow::Result<Arc<russh::keys::PrivateKey>>
     match russh::keys::load_secret_key(&path, None) {
         Ok(key) => Ok(Arc::new(key)),
         Err(first) => {
-            // Encrypted key? Prompt for the passphrase when a terminal exists.
-            if !stdin_is_terminal() {
+            // Encrypted key? Prompt for the passphrase when allowed.
+            if !allow_prompt {
                 anyhow::bail!(
-                    "cannot load identity file '{path}' ({first}); \
-                     key may be passphrase-protected — unlock it with ssh-agent or run on a terminal"
+                    "key may be passphrase-protected ({first}); \
+                     unlock it with ssh-agent or run on a terminal"
                 );
             }
             let pass = rpassword::prompt_password(format!("Enter passphrase for '{path}': "))
@@ -277,10 +433,29 @@ pub async fn connect(
         .await
         .with_context(|| format!("ssh connect to {host}:{port} failed"))?;
 
-    // 1. Explicit identity file.
+    // Auth follows ssh(1): agent identities first, then identity files in
+    // try order, then password when a terminal exists.
     let mut authenticated = false;
-    if let Some(path) = &opts.identity {
-        let key = load_identity_key(path)?;
+    if !authenticated {
+        match try_agent_auth(&mut handle, user).await {
+            Ok(true) => authenticated = true,
+            Ok(false) => {}
+            Err(e) => {
+                // Agent absent is normal (e.g. CI) — fall through to keys.
+                let _ = e;
+            }
+        }
+    }
+
+    let mut last_key_error: Option<String> = None;
+    for path in &opts.identity_files {
+        let key = match load_identity_key(path, stdin_is_terminal()) {
+            Ok(key) => key,
+            Err(e) => {
+                eprintln!("kash: skipping identity file '{path}': {e}");
+                continue;
+            }
+        };
         // Best-effort RSA hash negotiation; None = non-RSA or no extension.
         let hash_alg = handle.best_supported_rsa_hash().await.unwrap_or(None);
         let auth = handle
@@ -290,34 +465,16 @@ pub async fn connect(
             )
             .await
             .with_context(|| format!("ssh publickey auth as '{user}' failed"))?;
-        authenticated = auth.success();
-        if !authenticated {
-            anyhow::bail!("ssh publickey auth as '{user}' rejected (key '{path}')");
+        if auth.success() {
+            authenticated = true;
+            break;
         }
+        last_key_error = Some(format!("key '{path}' rejected"));
     }
 
-    // 2. ssh-agent (only when no explicit identity was given).
-    if !authenticated && opts.identity.is_none() {
-        match try_agent_auth(&mut handle, user).await {
-            Ok(true) => authenticated = true,
-            Ok(false) => {}
-            Err(e) => {
-                // Agent absent is normal (e.g. CI) — fall through to password.
-                let _ = e;
-            }
-        }
-    }
-
-    // 3. Password (explicit --password, or fallback when nothing else worked).
+    // 3. Password — ssh(1) prompts by default for interactive sessions.
     if !authenticated {
-        let need_password = opts.password || opts.identity.is_none();
-        if need_password {
-            if !stdin_is_terminal() {
-                anyhow::bail!(
-                    "ssh needs a password for '{user}@{host}' but there is no terminal — \
-                     use --identity <key> or ssh-agent for background sessions"
-                );
-            }
+        if stdin_is_terminal() || opts.password {
             let prompt = format!("{user}@{host}'s password: ");
             let password = rpassword::prompt_password(prompt).context("password prompt failed")?;
             let auth = handle
@@ -329,8 +486,11 @@ pub async fn connect(
                 anyhow::bail!("ssh password auth as '{user}' rejected");
             }
         } else {
+            let tried = opts.identity_files.len();
+            let detail = last_key_error.unwrap_or_else(|| "no usable identity".into());
             anyhow::bail!(
-                "ssh auth failed as '{user}' (no agent identity accepted; try --identity or --password)"
+                "ssh auth failed as '{user}@{host}' — tried ssh-agent and {tried} identity \
+                 file(s) ({detail}); run on a terminal for password auth or pass -i <key>"
             );
         }
     }
@@ -386,30 +546,30 @@ mod tests {
 
     #[test]
     fn parse_user_at_host() {
-        let t = SshTarget::parse("root@10.0.0.5", "kam").unwrap();
-        assert_eq!(t.user, "root");
+        let t = SshTarget::parse("root@10.0.0.5").unwrap();
+        assert_eq!(t.user.as_deref(), Some("root"));
         assert_eq!(t.host, "10.0.0.5");
     }
 
     #[test]
-    fn parse_bare_host_uses_default_user() {
-        let t = SshTarget::parse("10.0.0.5", "kam").unwrap();
-        assert_eq!(t.user, "kam");
+    fn parse_bare_host_keeps_user_optional() {
+        let t = SshTarget::parse("10.0.0.5").unwrap();
+        assert_eq!(t.user, None);
         assert_eq!(t.host, "10.0.0.5");
     }
 
     #[test]
     fn parse_rejects_empty() {
-        assert!(SshTarget::parse("", "kam").is_err());
-        assert!(SshTarget::parse("@", "kam").is_err());
-        assert!(SshTarget::parse("root@", "kam").is_err());
-        assert!(SshTarget::parse("@host", "kam").is_err());
+        assert!(SshTarget::parse("").is_err());
+        assert!(SshTarget::parse("@").is_err());
+        assert!(SshTarget::parse("root@").is_err());
+        assert!(SshTarget::parse("@host").is_err());
     }
 
     #[test]
     fn display_includes_port() {
-        let t = SshTarget::parse("root@h", "u").unwrap();
-        assert_eq!(t.display(2222), "root@h:2222");
+        let t = SshTarget::parse("root@h").unwrap();
+        assert_eq!(t.display(2222, "root"), "root@h:2222");
     }
 
     #[test]
@@ -447,9 +607,122 @@ mod tests {
 
     #[test]
     fn missing_identity_file_fails_fast() {
-        let err = load_identity_key("/nonexistent-path-xyz/kash-test-key")
+        let err = load_identity_key("/nonexistent-path-xyz/kash-test-key", false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("not found"), "{err}");
+    }
+
+    // -- resolution ----------------------------------------------------------
+
+    use std::path::Path as StdPath;
+    use std::path::PathBuf as StdPathBuf;
+
+    fn fixture_home(tag: &str) -> StdPathBuf {
+        let dir = std::env::temp_dir().join(format!("kash-ssh-home-{}-{tag}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join(".ssh"));
+        dir
+    }
+
+    fn res(
+        raw: &str,
+        login: Option<&str>,
+        port: Option<u16>,
+        ids: &[&str],
+        cfg: config::SshConfig,
+        home: Option<&StdPath>,
+    ) -> ResolvedConnect {
+        let target = SshTarget::parse(raw).unwrap();
+        let owned: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+        resolve_connect(&target, login, port, &owned, &cfg, home)
+    }
+
+    #[test]
+    fn resolve_cli_beats_config_beats_defaults() {
+        let cfg = config::SshConfig {
+            matched: "kali".into(),
+            host_name: Some("10.0.0.5".into()),
+            user: Some("parallels".into()),
+            port: Some(2222),
+            identity_files: Vec::new(),
+        };
+        // Bare target: config values apply.
+        let r = res("kali", None, None, &[], cfg.clone(), None);
+        assert_eq!(r.user, "parallels");
+        assert_eq!(r.host, "10.0.0.5");
+        assert_eq!(r.port, 2222);
+        // CLI beats config.
+        let r2 = res("parallels@kali", Some("root"), Some(22), &[], cfg, None);
+        assert_eq!(r2.user, "root");
+        assert_eq!(r2.port, 22);
+        // user@ prefix applied when no -l.
+        let r3 = res("parallels@kali", None, None, &[], config::SshConfig::default(), None);
+        assert_eq!(r3.user, "parallels");
+    }
+
+    #[test]
+    fn identity_order_cli_config_defaults() {
+        let home = fixture_home("order");
+        // Only one default key exists → it must be the last candidate.
+        std::fs::write(home.join(".ssh/id_ed25519"), b"x").unwrap();
+        let cfg = config::SshConfig {
+            identity_files: vec!["~/cfg_key".into()],
+            ..Default::default()
+        };
+        let r = res(
+            "kali",
+            None,
+            None,
+            &["~/cli_first"],
+            cfg,
+            Some(home.as_path()),
+        );
+        assert_eq!(
+            r.identity_files,
+            vec![
+                expand_tilde("~/cli_first"),
+                expand_tilde("~/cfg_key"),
+                home.join(".ssh/id_ed25519").to_string_lossy().into_owned(),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn default_probe_skips_absent_keys() {
+        let home = fixture_home("skip-absent");
+        let r = res("kali", None, None, &[], config::SshConfig::default(), Some(home.as_path()));
+        assert!(r.identity_files.is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn no_home_no_defaults() {
+        let r = res("kali", None, None, &[], config::SshConfig::default(), None);
+        assert!(r.identity_files.is_empty());
+    }
+
+    #[test]
+    fn config_hostname_overrides_alias() {
+        let cfg = config::SshConfig {
+            host_name: Some("real-host.internal".into()),
+            ..Default::default()
+        };
+        let r = res("kali", None, None, &[], cfg, None);
+        assert_eq!(r.host, "real-host.internal");
+    }
+
+    #[test]
+    fn dump_lists_resolved() {
+        let r = ResolvedConnect {
+            user: "parallels".into(),
+            host: "kali".into(),
+            port: 22,
+            identity_files: vec!["~/.ssh/id_ed25519".into()],
+            config_path: Some(StdPathBuf::from("/Users/kam/.ssh/config")),
+        };
+        let d = r.dump();
+        assert!(d.contains("host kali") && d.contains("user parallels"));
+        assert!(d.contains("identityfile ~/.ssh/id_ed25519"));
     }
 }

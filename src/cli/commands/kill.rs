@@ -5,6 +5,8 @@ use anyhow::Context;
 use crate::agent;
 use crate::cli::KillArgs;
 
+/// Send the graceful-kill signal over the session's IPC socket; the session
+/// loop tears down the remote shell, state files, and connection.
 pub async fn cmd_kill(args: KillArgs) -> anyhow::Result<()> {
     agent::kill_session(&args.session)
         .await

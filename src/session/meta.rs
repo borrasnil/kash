@@ -23,6 +23,8 @@ use crate::transfer;
 // Meta-action enum
 // ---------------------------------------------------------------------------
 
+/// Locally-intercepted commands, parsed from user input in either mode.
+/// Regular shell commands parse to `None`.
 pub(super) enum MetaAction {
     Help,
     Clear,
@@ -36,11 +38,17 @@ pub(super) enum MetaAction {
     Detach,
 }
 
+/// [`parse_meta`] over a raw keypress buffer (the shadow line maintained
+/// by the session loop in raw mode). Fails when the buffer isn't UTF-8.
 pub(super) fn parse_meta_raw(buf: &[u8]) -> Option<MetaAction> {
     let s = std::str::from_utf8(buf).ok()?;
     parse_meta(s)
 }
 
+/// Recognise a meta-command from a submitted line: `help`, `clear`, `pty`,
+/// `upgrade`, `detach`, `upload`, `download`. Returns `None` for ordinary
+/// shell input. `upload`/`download` default their missing argument to the
+/// other path's filename; a bare `upload`/`download` yields [`MetaAction::Help`].
 pub(super) fn parse_meta(cmd: &str) -> Option<MetaAction> {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     match parts.first().copied() {
@@ -158,10 +166,14 @@ pub(super) async fn execute_raw_meta(
 // Small utilities
 // ---------------------------------------------------------------------------
 
+/// Last non-empty line of `s` — the next remote prompt after a command's
+/// output. Used in handler mode to redraw `prompt + buffer` under it.
 pub(super) fn last_line(s: &str) -> String {
     s.lines().last().unwrap_or("").to_string()
 }
 
+/// Remove the done-marker line counted for `nonce` from display text, or
+/// return `s` unchanged when there's no nonce/match.
 pub(super) fn strip_done_marker(s: &str, nonce: Option<&str>) -> String {
     let Some(nonce) = nonce else {
         return s.to_string();
@@ -175,6 +187,8 @@ pub(super) fn strip_done_marker(s: &str, nonce: Option<&str>) -> String {
     }
 }
 
+/// Remove the start-marker line counted for `nonce` from display text, or
+/// return `s` unchanged when there's no nonce/match.
 pub(super) fn strip_start_marker(s: &str, nonce: Option<&str>) -> String {
     let Some(nonce) = nonce else {
         return s.to_string();

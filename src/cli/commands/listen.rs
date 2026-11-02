@@ -19,6 +19,7 @@ pub struct ReverseTransport {
 }
 
 impl Transport for ReverseTransport {
+    /// Bind, accept one inbound connection, and split it into boxed halves.
     async fn connect(&self) -> anyhow::Result<(BoxReader, BoxWriter, TransportInfo)> {
         let (stream, peer_addr) = crate::listen::listen(&self.bind, self.port)
             .await
@@ -30,6 +31,10 @@ impl Transport for ReverseTransport {
     }
 }
 
+/// `listen` front door: pick a session ID, optionally spawn a detached
+/// daemon child (Unix `-d`), then accept one reverse connection and hand it
+/// to [`run_session`]. A `--shell windows` request marks the dialect so
+/// marker framing speaks PowerShell.
 pub async fn cmd_listen(args: ListenArgs) -> anyhow::Result<()> {
     let session_id = args
         .common

@@ -15,6 +15,9 @@ pub async fn send_command(session_id: &str, cmd: &str) -> anyhow::Result<(String
     let mut stream = UnixStream::connect(&path).await.map_err(|_| {
         anyhow::anyhow!("session '{session_id}' not found — is kash listening?")
     })?;
+    // A detached-but-not-`bg`ed session accepts connects while frozen —
+    // resume it so the command isn't hung behind a stopped process.
+    super::rescue_stopped(session_id);
 
     stream.write_all(format!("{cmd}\n").as_bytes()).await?;
 

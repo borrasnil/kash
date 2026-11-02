@@ -16,6 +16,7 @@ pub(super) struct CleanupGuard {
 }
 
 impl CleanupGuard {
+    /// Arm cleanup for `session_id`'s socket and info files.
     pub(super) fn new(session_id: &str) -> Self {
         Self {
             sock_path: agent::socket_path(session_id),
@@ -25,6 +26,9 @@ impl CleanupGuard {
 }
 
 impl Drop for CleanupGuard {
+    /// Remove the socket and info files — drops stale entries so the next
+    /// `ps` scan doesn't list this session. Best-effort; errors ignored
+    /// because the files may already be gone.
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.sock_path);
         let _ = std::fs::remove_file(&self.meta_path);
@@ -46,9 +50,15 @@ pub(super) struct LiveMeta {
     pub last_cmd: String,
     pub last_cmd_at: u64,
     pub cmd_count: u32,
+    /// Serving process pid — lets attach/RPC `SIGCONT` a session that was
+    /// detached via SIGTSTP without the documented `bg` (otherwise the
+    /// attach client shows a banner over a stopped, silent process).
+    pub pid: u32,
 }
 
 impl LiveMeta {
+    /// Build live metadata from the transport's identity probe result;
+    /// `started` is stamped to now.
     pub fn new(
         session_id: &str,
         transport: &TransportInfo,
@@ -71,9 +81,12 @@ impl LiveMeta {
             last_cmd: String::new(),
             last_cmd_at: 0,
             cmd_count: 0,
+            pid: std::process::id(),
         }
     }
 
+    /// Record a submitted command (display name for module runs) and bump
+    /// the counter; re-persists the info file each time.
     pub fn record_cmd(&mut self, cmd: &str) {
         self.last_cmd = cmd.trim().replace('\n', " ");
         self.last_cmd_at = std::time::SystemTime::now()
@@ -84,10 +97,12 @@ impl LiveMeta {
         self.persist();
     }
 
+    /// Write the info file consumed by `ps`/`inspect`. Best-effort — a
+    /// full disk or read-only `/tmp` must not kill the session.
     pub fn persist(&self) {
         let content = format!(
             "peer={}\nuser={}\nhost={}\ntransport={}\nshell={}\n\
-             started={}\nlast_cmd={}\nlast_cmd_at={}\ncmd_count={}\n",
+             started={}\nlast_cmd={}\nlast_cmd_at={}\ncmd_count={}\npid={}\n",
             self.peer,
             self.user,
             self.host,
@@ -97,15 +112,17 @@ impl LiveMeta {
             self.last_cmd,
             self.last_cmd_at,
             self.cmd_count,
+            self.pid,
         );
         let _ = std::fs::write(agent::info_path(&self.session_id), content);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Display state — tracks multi-row input so it can be fully erased on redraw
+/// Display state — tracks multi-row input so it can be fully erased on redraw
 // ---------------------------------------------------------------------------
 
+/// Where the handler-mode input display lives on screen, so remote output
+/// can erase it cleanly (prompt + buffer may span several wrapped rows).
 #[derive(Clone, Copy, Default)]
 pub(super) struct DisplayState {
     /// Row the cursor is on within the prompt+buffer display (0 = top).
@@ -116,8 +133,13 @@ pub(super) struct DisplayState {
 // Session state machine
 // ---------------------------------------------------------------------------
 
+/// What the session loop does with incoming remote data: display it as
+/// normal, or collect it into an agent buffer until the done marker.
 pub(super) enum SessionState {
+    /// Plain interactive passthrough.
     Interactive,
+    /// An agent command is running; text is accumulated until
+    /// `SH_CMD_DONE_<nonce>:<exit>` is seen.
     AgentCollecting {
         nonce: String,
         buffer: String,

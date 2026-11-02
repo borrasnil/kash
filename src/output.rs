@@ -97,6 +97,17 @@ pub fn display_output(data: &[u8]) -> String {
     String::from_utf8_lossy(&result).into_owned()
 }
 
+/// Strip ALL ANSI escape sequences and control characters from shell output.
+///
+/// Removes CSI sequences (`\x1b[...letter`), OSC sequences
+/// (`\x1b]...\x07` or `\x1b]...\x1b\`), bare escapes, carriage
+/// returns, null bytes, and bell characters. Preserves `\n`, `\t`,
+/// printable ASCII, and UTF-8 multi-byte sequences.
+///
+/// Used wherever the handler needs geometry-safe text: agent output
+/// buffering, prompt tracking, and the *visible* prompt used for column
+/// maths. See [`display_output`] for the display variant that keeps SGR
+/// colours.
 pub fn clean_output(data: &[u8]) -> String {
     let mut cleaned = Vec::with_capacity(data.len());
     let mut i = 0;

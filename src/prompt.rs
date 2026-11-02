@@ -17,6 +17,8 @@ const YELLOW: &str = "\x1b[1;33m";
 const CYAN: &str = "\x1b[1;36m";
 const WHITE: &str = "\x1b[1;37m";
 
+/// Short single-word label for a shell type ("auto" | "linux" | "windows"),
+/// shown in banners and persisted in session metadata.
 pub fn shell_label(shell: ShellType) -> &'static str {
     match shell {
         ShellType::Auto => "auto",

@@ -46,7 +46,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Listen(args) => commands::listen::cmd_listen(args).await,
-        Command::Ps(args) => commands::ps::cmd_ps(args),
+        Command::Ps(args) => commands::ps::cmd_ps(args).await,
         Command::Exec(args) => commands::exec::cmd_exec(args).await,
         Command::Inspect(args) => commands::inspect::cmd_inspect(args),
         Command::Kill(args) => commands::kill::cmd_kill(args).await,

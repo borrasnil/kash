@@ -4,6 +4,8 @@ use crate::cli::ModulesArgs;
 use crate::script;
 use crate::util::json_str;
 
+/// List script modules found by [`crate::script::discover`] as a table or
+/// JSON array (name, shell, description, path, source directory).
 pub fn cmd_modules(args: ModulesArgs) -> anyhow::Result<()> {
     let modules = script::discover();
 

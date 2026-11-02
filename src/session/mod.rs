@@ -137,6 +137,15 @@ pub async fn run_session(
     // create it when we have a local terminal (non-headless). Headless
     // daemons never poll keyboard input.
     let mut events: Option<EventStream> = if headless { None } else { Some(EventStream::new()) };
+    // Defensive: a detached (background) session must never re-stop itself
+    // when something touches the controlling tty. With SIGTTIN/SIGTTOU
+    // ignored, background tty reads/writes fail with an error instead of
+    // suspending the process.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGTTIN, libc::SIG_IGN);
+        libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+    }
     let mut editor = LineEditor::new();
     let mut net_buf = vec![0u8; 8192];
     let mut state = SessionState::Interactive;
@@ -235,7 +244,7 @@ pub async fn run_session(
                                 &mut editor, &mut display_state,
                                 &mut meta, &mut raw_mode, &mut reader,
                                 &mut ctrl_c_exit_armed,
-                                &mut terminal_active, session_id, shell_type,
+                                &mut terminal_active, &mut events, session_id, shell_type,
                                 transport.caps,
                             ).await?;
                             // Clear shadow buffer when switching into raw mode.
@@ -644,6 +653,15 @@ pub async fn run_session(
                     let (ar, aw) = attach_stream.into_split();
                     attached_reader = Some(ar);
                     attached_writer = Some(aw);
+                    // Anchor the attach screen: raw-PTY shells won't redraw
+                    // their prompt on their own, so a fresh PS1 must be
+                    // coaxed — otherwise the new client sits on a blank
+                    // screen with no indication the session is live.
+                    if transport.caps.has_pty {
+                        let _ = writer.write_all(b"\x1b[2k\r").await; // clear current line
+                        let _ = writer.write_all(b"\n").await;        // fresh PS1
+                        let _ = writer.flush().await;
+                    }
                 }
             }
 
@@ -788,6 +806,7 @@ async fn handle_le_key(
     reader: &mut (dyn AsyncRead + Unpin + Send),
     ctrl_c_exit_armed: &mut bool,
     terminal_active: &mut bool,
+    events: &mut Option<EventStream>,
     session_id: &str,
     shell_type: ShellType,
     caps: TransportCaps,
@@ -843,6 +862,10 @@ async fn handle_le_key(
             )?;
             stdout.flush()?;
             *terminal_active = false;
+            // Stop polling the local terminal: once this process runs in the
+            // background, reading the controlling tty raises SIGTTIN and
+            // re-stops the process (exec/attach then never see a reply).
+            *events = events.take();
             #[cfg(unix)]
             unsafe {
                 libc::raise(libc::SIGTSTP);
@@ -982,6 +1005,8 @@ async fn handle_le_key(
                     // prompt returns immediately.  The user types 'bg' once and the
                     // session keeps running in the background.
                     *terminal_active = false;
+                    // Same SIGTTIN guard as the CTRL+Z detach path above.
+                    *events = None;
                     #[cfg(unix)]
                     unsafe {
                         libc::raise(libc::SIGTSTP);
@@ -1016,6 +1041,9 @@ async fn handle_le_key(
     Ok(false)
 }
 
+/// Reply to a pending agent command and reset to [`SessionState::Interactive`].
+/// `exit_code` 130 marks a locally cancelled command (CTRL+C), other codes
+/// pass through; no-op when no command is being collected.
 fn cancel_agent(state: &mut SessionState, exit_code: i32) {
     if let SessionState::AgentCollecting { response_tx, .. } =
         std::mem::replace(state, SessionState::Interactive)
@@ -1031,6 +1059,10 @@ fn cancel_agent(state: &mut SessionState, exit_code: i32) {
 // Utilities
 // ---------------------------------------------------------------------------
 
+/// Send a dialect-appropriate `whoami/hostname` probe and wait (≤2 s) for a
+/// `SHIDENTITY:<user>:<host>` line in the response, tolerating prompt noise
+/// around it. Falls back to `"?"`/`"?"` on timeout, failure, or a dialect
+/// that can't emit a usable probe.
 async fn probe_identity(
     reader: &mut (dyn AsyncRead + Unpin + Send),
     writer: &mut (dyn AsyncWrite + Unpin + Send),

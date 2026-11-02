@@ -16,6 +16,11 @@
 
 use thiserror::Error;
 
+/// Typed errors for kash's fallible operations.
+///
+/// Most of the binary surfaces errors as [`anyhow::Error`] with context; this
+/// enum exists where a caller needs to match on the failure shape (e.g. tests
+/// asserting bind/accept failures).
 #[derive(Error, Debug)]
 pub enum ShellHandlerError {
     #[error("Failed to bind to {addr}: {source}")]

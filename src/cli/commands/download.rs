@@ -7,6 +7,8 @@ use anyhow::Context;
 use crate::agent;
 use crate::cli::DownloadArgs;
 
+/// Resolve the local destination (defaults to the remote filename) and run
+/// the download through the session's IPC; exits with the remote's code.
 pub async fn cmd_download(args: DownloadArgs) -> anyhow::Result<()> {
     let local = args.local.unwrap_or_else(|| {
         std::path::Path::new(&args.remote)

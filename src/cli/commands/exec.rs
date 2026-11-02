@@ -8,6 +8,8 @@ use crate::agent;
 use crate::cli::{ExecArgs, OutputFormat};
 use crate::util::json_str;
 
+/// Inject `args` as one agent command, print the collected output (text or
+/// JSON), and exit with the command's remote exit code.
 pub async fn cmd_exec(args: ExecArgs) -> anyhow::Result<()> {
     let cmd = args.command_str();
     if cmd.trim().is_empty() {

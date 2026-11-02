@@ -12,11 +12,27 @@ use crate::prompt;
 use crate::terminal::RawModeGuard;
 use crate::util::{key_to_bytes, raw_normalize};
 
+/// Open an `ATTACH_CMD` IPC connection to the session, enable raw mode, and
+/// relay bytes bidirectionally until detach (CTRL+Q / CTRL+]), session close,
+/// or EOF. Sends an initial `stty` so remote geometry matches this terminal.
 pub async fn cmd_attach(args: AttachArgs) -> anyhow::Result<()> {
     let sock = agent::socket_path(&args.session);
     if !std::path::Path::new(&sock).exists() {
         anyhow::bail!("session '{}' not found", args.session);
     }
+    if !agent::session_alive(&args.session).await {
+        // Stale files from a killed/rebooted process — prune them like `ps`.
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_file(agent::info_path(&args.session));
+        anyhow::bail!(
+            "session '{}' is dead (its kash process exited — reboot or crash); \
+             start a new session instead",
+            args.session
+        );
+    }
+    // Detach without `bg` leaves the serving process SIGSTOPed — it accepts
+    // connections but stays silent. Wake it before anything else flows.
+    agent::rescue_stopped(&args.session);
 
     let stream = tokio::net::UnixStream::connect(&sock).await.map_err(|_| {
         anyhow::anyhow!(
@@ -52,6 +68,10 @@ pub async fn cmd_attach(args: AttachArgs) -> anyhow::Result<()> {
 
     let mut events = EventStream::new();
     let mut sock_buf = vec![0u8; 4096];
+    // The server relays a `[-] session closed` banner before cutting the
+    // stream. Whether that relay lands is racy (it can die on the same EOF),
+    // so print our banner on EOF only when the relay didn't arrive.
+    let mut saw_closed_banner = false;
 
     loop {
         tokio::select! {
@@ -59,9 +79,14 @@ pub async fn cmd_attach(args: AttachArgs) -> anyhow::Result<()> {
             result = sock_reader.read(&mut sock_buf) => {
                 let n = result?;
                 if n == 0 {
-                    write!(stdout, "\r\n{}\r\n", prompt::banner_attach_session_closed())?;
-                    stdout.flush()?;
+                    if !saw_closed_banner {
+                        write!(stdout, "\r\n{}\r\n", prompt::banner_attach_session_closed())?;
+                        stdout.flush()?;
+                    }
                     break;
+                }
+                if sock_buf[..n].windows(b"session closed".len()).any(|w| w == b"session closed") {
+                    saw_closed_banner = true;
                 }
                 stdout.write_all(&raw_normalize(&sock_buf[..n]))?;
                 stdout.flush()?;

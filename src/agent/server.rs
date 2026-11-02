@@ -39,6 +39,11 @@ pub fn serve(
     Ok(())
 }
 
+/// Serve one IPC connection: read the single command line, dispatch it to
+/// the session loop through `cmd_tx`, and write the response back with the
+/// `\x00SHEX:<exit>` trailer. `ATTACH_CMD` connections bypass the ordinary
+/// protocol — the stream is reunited and handed to `attach_tx` for raw
+/// bidirectional relay by the session loop.
 async fn handle_conn(
     stream: UnixStream,
     cmd_tx: mpsc::Sender<AgentCommand>,

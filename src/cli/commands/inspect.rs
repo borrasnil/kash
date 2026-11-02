@@ -4,6 +4,8 @@ use crate::agent;
 use crate::cli::InspectArgs;
 use crate::util::{time_ago, unix_to_datetime_str};
 
+/// Print the session's `/tmp/.shh-<id>.info` metadata (identity, transport,
+/// shell, uptime, command count) as a human-readable block.
 pub fn cmd_inspect(args: InspectArgs) -> anyhow::Result<()> {
     let sock = agent::socket_path(&args.session);
     if !std::path::Path::new(&sock).exists() {

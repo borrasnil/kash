@@ -31,6 +31,8 @@ pub enum ModuleShell {
 }
 
 impl ModuleShell {
+    /// Short machine-friendly label ("linux" | "windows" | "any") used in
+    /// `modules` listings and shell-compat checks.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Linux => "linux",
@@ -88,6 +90,7 @@ pub fn module_dirs() -> Vec<std::path::PathBuf> {
     dirs
 }
 
+/// The user's home directory (`$HOME` on Unix, `$USERPROFILE` on Windows).
 fn home_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))

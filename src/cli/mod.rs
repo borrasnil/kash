@@ -11,16 +11,27 @@ use clap::{Args as ClapArgs, Parser, Subcommand};
 // Shared enums
 // ---------------------------------------------------------------------------
 
+/// Shell dialect assumed on the remote target.
+///
+/// Drives the PTY upgrade choice, marker framing, and transfer paths in
+/// the session loop; `Auto` means "probe/assume POSIX" (Windows override
+/// for reverse/SSH sessions happens via `--shell windows`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShellType {
+    /// Probe POSIX ways and assume a POSIX shell.
     Auto,
+    /// Force POSIX treatment.
     Linux,
+    /// Force Windows (PowerShell/cmd) treatment.
     Windows,
 }
 
+/// Rendering for machine-readable output ("text" | "json").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
+    /// Human-formatted text.
     Text,
+    /// Single-line escaped JSON object.
     Json,
 }
 
@@ -28,6 +39,7 @@ pub enum OutputFormat {
 // Clap wrappers (for FromStr / Display)
 // ---------------------------------------------------------------------------
 
+/// Clap wrapper so `--shell` parses via the `auto|linux|windows` strings.
 #[derive(Debug, Clone)]
 pub struct ShellTypeArg(pub ShellType);
 
@@ -53,6 +65,7 @@ impl std::fmt::Display for ShellTypeArg {
     }
 }
 
+/// Clap wrapper so `--format` parses via the `text|json` strings.
 #[derive(Debug, Clone)]
 pub struct OutputFormatArg(pub OutputFormat);
 
@@ -111,6 +124,8 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// Top-level subcommand dispatch. Per-variant docs double as `kash help`
+/// descriptions; handler bodies live in [`commands`].
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Start a listener and wait for an incoming reverse shell.
@@ -154,6 +169,7 @@ pub enum Command {
 // Subcommand args
 // ---------------------------------------------------------------------------
 
+/// `listen` — bind a TCP port and wait for one inbound reverse shell.
 #[derive(ClapArgs, Debug)]
 pub struct ListenArgs {
     /// TCP port to listen on.
@@ -173,11 +189,13 @@ pub struct ListenArgs {
 }
 
 impl ListenArgs {
+    /// Shell type carried by the CLI arg.
     pub fn shell_type(&self) -> ShellType {
         self.shell.0
     }
 }
 
+/// `ps` — list active sessions discovered via `/tmp/.shh-*.sock`.
 #[derive(ClapArgs, Debug)]
 pub struct PsArgs {
     /// Print only session IDs, one per line (machine-readable).
@@ -189,6 +207,7 @@ pub struct PsArgs {
     pub json: bool,
 }
 
+/// `exec` — run one command in a live session through the agent IPC.
 #[derive(ClapArgs, Debug)]
 pub struct ExecArgs {
     /// Session ID to inject the command into.
@@ -227,29 +246,35 @@ impl ExecArgs {
             None => self.command.join(" "),
         }
     }
+    /// Effective output format for machine-readable rendering.
     pub fn output_format(&self) -> OutputFormat {
         self.format.0
     }
 }
 
+/// `inspect` — print one session's stored metadata.
 #[derive(ClapArgs, Debug)]
 pub struct InspectArgs {
     /// Session ID to inspect.
     pub session: String,
 }
 
+/// `kill` — terminate a running session gracefully.
 #[derive(ClapArgs, Debug)]
 pub struct KillArgs {
     /// Session ID to terminate.
     pub session: String,
 }
 
+/// `attach` — drop the current terminal into a live session as its
+/// single interactive client.
 #[derive(ClapArgs, Debug)]
 pub struct AttachArgs {
     /// Session ID to attach to.
     pub session: String,
 }
 
+/// `upload` — push a local file to the session's remote system.
 #[derive(ClapArgs, Debug)]
 pub struct UploadArgs {
     /// Session ID.
@@ -260,6 +285,7 @@ pub struct UploadArgs {
     pub remote: Option<String>,
 }
 
+/// `download` — pull a remote file from the session to the local disk.
 #[derive(ClapArgs, Debug)]
 pub struct DownloadArgs {
     /// Session ID.
@@ -270,6 +296,7 @@ pub struct DownloadArgs {
     pub local: Option<String>,
 }
 
+/// `run` — execute a script module (`.sh`/`.ps1`/`.py`) in a session.
 #[derive(ClapArgs, Debug)]
 pub struct RunArgs {
     /// Module name (see `kash modules`).
@@ -288,11 +315,13 @@ pub struct RunArgs {
 }
 
 impl RunArgs {
+    /// Effective output format for machine-readable rendering.
     pub fn output_format(&self) -> OutputFormat {
         self.format.0
     }
 }
 
+/// `modules` — list discoverable script modules.
 #[derive(ClapArgs, Debug)]
 pub struct ModulesArgs {
     /// Output as JSON array.
@@ -326,26 +355,46 @@ pub struct SessionArgs {
     pub headless: bool,
 }
 
+/// `ssh` — connect out to an SSH server and manage it like a session.
 #[derive(ClapArgs, Debug)]
 pub struct SshArgs {
-    /// Remote target as [user@]host.
-    pub target: String,
+    /// Remote target as [user@]host (exact ssh client argument format).
+    pub target: Option<String>,
 
-    /// SSH port (default: 22).
-    #[arg(short = 'p', long, default_value_t = 22)]
-    pub port: u16,
+    /// Nested subcommands (`kash ssh config <target>` — ssh -G style
+    /// diagnostic, no connection).
+    #[command(subcommand)]
+    pub sub: Option<SshSub>,
 
-    /// Identity (private key) file for publickey auth.
-    #[arg(short = 'i', long)]
-    pub identity: Option<String>,
+    /// SSH port (same as ssh -p; config `Port` when omitted).
+    #[arg(short = 'p', long, global = true)]
+    pub port: Option<u16>,
+
+    /// Identity (private key) file, repeatable like ssh -i. Files are tried
+    /// after ssh-agent, before the default key probe.
+    #[arg(short = 'i', long, global = true)]
+    pub identity: Vec<String>,
+
+    /// Login user (same as ssh -l), beats the `user@` prefix, ssh_config `User`.
+    #[arg(short = 'l', long, global = true)]
+    pub login: Option<String>,
+
+    /// Alternative ssh_config file (same as ssh -F; default ~/.ssh/config).
+    #[arg(short = 'F', long, global = true)]
+    pub config: Option<String>,
+
+    /// ssh_config style options (same as ssh -o): StrictHostKeyChecking,
+    /// User, Port, IdentityFile.
+    #[arg(short = 'o', long, global = true)]
+    pub option: Vec<String>,
 
     /// Prompt for password auth (also used as fallback when agent/keys fail).
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub password: bool,
 
     /// Reject unknown host keys instead of trusting on first use.
     /// Mismatched (changed) keys are always rejected.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub strict_host_key_checking: bool,
 
     /// Target shell type: auto | linux | windows.
@@ -357,12 +406,25 @@ pub struct SshArgs {
     pub common: SessionArgs,
 }
 
+/// Subcommands nested under `kash ssh`.
+#[derive(Subcommand, Debug, Clone)]
+pub enum SshSub {
+    /// Print the resolved ssh -G style values for a target, then exit.
+    #[command(name = "config")]
+    Config {
+        /// Target to resolve as [user@]host.
+        target: String,
+    },
+}
+
 impl SshArgs {
+    /// Shell type carried by the CLI arg.
     pub fn shell_type(&self) -> ShellType {
         self.shell.0
     }
 }
 
+/// `winrm` — connect to a Windows host over WinRM and manage it like a session.
 #[derive(ClapArgs, Debug)]
 pub struct WinrmArgs {
     /// Remote target as [user@]host.
@@ -623,7 +685,11 @@ mod tests {
     fn removed_short_flag_rejected() {
         // `-o` used to select obfuscation (removed) — it must now fail.
         assert!(Cli::try_parse_from(["sh", "listen", "4444", "-o", "light"]).is_err());
-        assert!(Cli::try_parse_from(["sh", "ssh", "h", "-o", "light"]).is_err());
+        // On ssh, -o is back but only with ssh_config keywords; unknown
+        // values are accepted by the parser and skipped at runtime.
+        let cli = Cli::try_parse_from(["sh", "ssh", "h", "-o", "light"]).unwrap();
+        let Command::Ssh(a) = cli.command else { panic!() };
+        assert_eq!(a.option, vec!["light".to_string()]);
     }
 
     #[test]
@@ -635,9 +701,9 @@ mod tests {
     fn ssh_minimal() {
         let cli = Cli::try_parse_from(["sh", "ssh", "root@10.0.0.5"]).unwrap();
         let Command::Ssh(a) = cli.command else { panic!() };
-        assert_eq!(a.target, "root@10.0.0.5");
-        assert_eq!(a.port, 22);
-        assert!(a.identity.is_none());
+        assert_eq!(a.target.as_deref(), Some("root@10.0.0.5"));
+        assert_eq!(a.port, None, "config/defaults decide when omitted");
+        assert!(a.identity.is_empty());
         assert!(!a.password);
         assert!(!a.strict_host_key_checking);
         assert!(!a.common.daemon);
@@ -654,9 +720,9 @@ mod tests {
         ])
         .unwrap();
         let Command::Ssh(a) = cli.command else { panic!() };
-        assert_eq!(a.target, "kam@host");
-        assert_eq!(a.port, 2222);
-        assert_eq!(a.identity.as_deref(), Some("/tmp/key"));
+        assert_eq!(a.target.as_deref(), Some("kam@host"));
+        assert_eq!(a.port, Some(2222));
+        assert_eq!(a.identity, vec!["/tmp/key".to_string()]);
         assert!(a.password);
         assert!(a.strict_host_key_checking);
         assert!(a.common.daemon);
@@ -664,8 +730,34 @@ mod tests {
     }
 
     #[test]
-    fn ssh_missing_target_fails() {
-        assert!(Cli::try_parse_from(["sh", "ssh"]).is_err());
+    fn ssh_flags_repeatable_like_ssh_client() {
+        let cli = Cli::try_parse_from([
+            "sh", "ssh", "-i", "k1", "-i", "k2", "-l", "parallels", "-F", "/tmp/alt-config",
+            "-o", "StrictHostKeyChecking=yes", "-o", "Port=2200", "kali",
+        ])
+        .unwrap();
+        let Command::Ssh(a) = cli.command else { panic!() };
+        assert_eq!(a.identity, vec!["k1".to_string(), "k2".to_string()]);
+        assert_eq!(a.login.as_deref(), Some("parallels"));
+        assert_eq!(a.config.as_deref(), Some("/tmp/alt-config"));
+        assert_eq!(a.option.len(), 2);
+    }
+
+    #[test]
+    fn ssh_config_subcommand() {
+        let cli = Cli::try_parse_from(["sh", "ssh", "config", "kali"]).unwrap();
+        let Command::Ssh(a) = cli.command else { panic!() };
+        let Some(crate::cli::SshSub::Config { target }) = &a.sub else { panic!("subcommand") };
+        assert_eq!(target, "kali");
+    }
+
+    #[test]
+    fn ssh_missing_target_allowed_for_config_sub() {
+        // No positional + no sub is only rejected at runtime by cmd_ssh.
+        let cli = Cli::try_parse_from(["sh", "ssh"]).unwrap();
+        let Command::Ssh(a) = cli.command else { panic!() };
+        assert_eq!(a.target, None);
+        assert!(a.sub.is_none());
     }
 
     #[test]

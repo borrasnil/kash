@@ -4,8 +4,11 @@ use crate::agent;
 use crate::cli::PsArgs;
 use crate::util::json_str;
 
-pub fn cmd_ps(args: PsArgs) -> anyhow::Result<()> {
-    let sessions = agent::list_sessions();
+/// List active sessions as an ID-only list (`-q`), JSON array (`--json`),
+/// or a human-readable table. Dead sessions (socket files without a serving
+/// process, e.g. after a crash/reboot) are pruned and not listed.
+pub async fn cmd_ps(args: PsArgs) -> anyhow::Result<()> {
+    let sessions = agent::list_sessions_alive().await;
 
     if sessions.is_empty() && !args.quiet && !args.json {
         println!("no active sessions");

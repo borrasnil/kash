@@ -7,6 +7,8 @@ use anyhow::Context;
 use crate::agent;
 use crate::cli::UploadArgs;
 
+/// Resolve the remote destination (defaults to the local filename) and run
+/// the upload through the session's IPC; exits with the remote's code.
 pub async fn cmd_upload(args: UploadArgs) -> anyhow::Result<()> {
     if !std::path::Path::new(&args.local).exists() {
         anyhow::bail!("local file not found: {}", args.local);

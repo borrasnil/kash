@@ -30,11 +30,19 @@ use tokio::sync::oneshot;
 // Shared types
 // ---------------------------------------------------------------------------
 
+/// One inbound IPC command plus the channel to answer it on. Created by the
+/// socket listener in [`server`] and consumed by the session loop; the
+/// command string is one of the `__SHHANDLER_*` prefixed special forms or a
+/// plain command to run on the remote shell.
 pub struct AgentCommand {
+    /// Raw command line (terminated form stripped by the server).
     pub cmd: String,
     pub response_tx: oneshot::Sender<AgentResponse>,
 }
 
+/// Answer sent back over the IPC connection: collected output plus the
+/// command's exit code (negative/special values encode cancellation and
+/// timeouts — see the session loop's `cancel_agent` and watchdog).
 pub struct AgentResponse {
     pub output: String,
     pub exit_code: i32,
@@ -65,6 +73,8 @@ pub const RUN_CMD_PREFIX: &str = "__SHHANDLER_RUN__\x00";
 // Session metadata (written to /tmp/.shh-<id>.info, read by `ps`/`inspect`)
 // ---------------------------------------------------------------------------
 
+/// One active session, parsed from its `/tmp/.shh-<id>.info` metadata file
+/// (`"?"` for fields written by unknown/older binaries).
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
     pub id: String,
@@ -83,6 +93,8 @@ pub struct SessionInfo {
     pub last_cmd_at: u64,
     /// Total commands run in this session.
     pub cmd_count: u32,
+    /// Serving process pid (0 = unknown, older binaries or foreign files).
+    pub pid: u32,
 }
 
 /// Return all currently-active sessions by scanning /tmp for socket files.
@@ -107,6 +119,55 @@ pub fn list_sessions() -> Vec<SessionInfo> {
     sessions
 }
 
+/// Live-probe one session by connecting to its socket. A socket file without
+/// a serving process (crash, reboot) refuses the connect — dead.
+pub async fn session_alive(id: &str) -> bool {
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        tokio::net::UnixStream::connect(socket_path(id)),
+    )
+    .await
+    {
+        Ok(Ok(_)) => true,
+        _ => false,
+    }
+}
+
+/// [`list_sessions`] with a liveness check. Sessions whose socket no longer
+/// has a serving process are pruned (`rm` of the stale `.sock`/`.info`
+/// leftovers) and dropped, so `ps` only shows sessions that can actually be
+/// attached/exec'd. The probe is a local unix-socket connect — sub-ms for
+/// live sessions, instant `ECONNREFUSED` for dead ones.
+pub async fn list_sessions_alive() -> Vec<SessionInfo> {
+    let mut out = Vec::new();
+    for s in list_sessions() {
+        if session_alive(&s.id).await {
+            out.push(s);
+        } else {
+            let _ = std::fs::remove_file(socket_path(&s.id));
+            let _ = std::fs::remove_file(info_path(&s.id));
+        }
+    }
+    out
+}
+
+/// Best-effort `SIGCONT` to the session's serving process. A session left
+/// SIGSTOPed (detach before the documented `bg`) looks live to a probe —
+/// the listener accepts — but relays nothing: attach shows a banner over a
+/// frozen stream and RPC hangs. Resuming on connect makes both recover.
+/// Harmless no-op for running sessions, unix-only, silent on errors.
+pub fn rescue_stopped(session_id: &str) {
+    #[cfg(unix)]
+    {
+        let pid = read_session_info(session_id).pid;
+        if pid > 0 {
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGCONT);
+            }
+        }
+    }
+}
+
 /// Read the `.info` file for a session; missing fields come back as `"?"`.
 pub fn read_session_info(id: &str) -> SessionInfo {
     let mut info = SessionInfo {
@@ -120,6 +181,7 @@ pub fn read_session_info(id: &str) -> SessionInfo {
         last_cmd: String::new(),
         last_cmd_at: 0,
         cmd_count: 0,
+        pid: 0,
     };
     let path = info_path(id);
     if let Ok(content) = std::fs::read_to_string(path) {
@@ -135,6 +197,7 @@ pub fn read_session_info(id: &str) -> SessionInfo {
                     "last_cmd" => info.last_cmd = v.to_string(),
                     "last_cmd_at" => info.last_cmd_at = v.parse().unwrap_or(0),
                     "cmd_count" => info.cmd_count = v.parse().unwrap_or(0),
+                    "pid" => info.pid = v.parse().unwrap_or(0),
                     _ => {}
                 }
             }
@@ -147,10 +210,16 @@ pub fn read_session_info(id: &str) -> SessionInfo {
 // Filesystem paths
 // ---------------------------------------------------------------------------
 
+/// Unix socket path for a session (`/tmp/.shh-<id>.sock`).
+///
+/// The presence of this file is itself the session registry: `ps` scans for
+/// it, and `attach`/`exec` connect to it directly.
 pub fn socket_path(session_id: &str) -> String {
     format!("/tmp/.shh-{session_id}.sock")
 }
 
+/// Path of the key=value metadata file written by the session loop
+/// (see [`SessionInfo`] for the field list).
 pub fn info_path(session_id: &str) -> String {
     format!("/tmp/.shh-{session_id}.info")
 }

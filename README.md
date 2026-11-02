@@ -1,6 +1,6 @@
 # kash
 
-![version](https://img.shields.io/badge/version-0.3.0-blue)
+![version](https://img.shields.io/badge/version-0.4.0-blue)
 ![platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey)
 
 A reverse shell handler written in Rust, with Docker-style session management.
@@ -65,7 +65,7 @@ kash listen 4444 -d
 ```
 
 ```console
-  kash  ────────────────────────────  v0.3.0  daemon
+  kash  ────────────────────────────  v0.4.0  daemon
 
   shell type   : auto
   listener     : 0.0.0.0:4444
